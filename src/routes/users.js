@@ -27,7 +27,7 @@ router.get("/me", async (req, res, next) => {
 // Update current user (name, password)
 router.put("/me", async (req, res, next) => {
   try {
-    const { name, password } = req.body;
+    const { name, email, password } = req.body;
     if (!name && !password)
       return res.status(400).json({ error: "Nothing to update" });
     const pool = getPool();
@@ -38,8 +38,9 @@ router.put("/me", async (req, res, next) => {
         [name || null, passwordHash, req.user.id]
       );
     } else {
-      await pool.query("UPDATE users SET name = ? WHERE id = ?", [
+      await pool.query("UPDATE users SET name = ? , email = ? WHERE id = ?", [
         name,
+        email,
         req.user.id,
       ]);
     }

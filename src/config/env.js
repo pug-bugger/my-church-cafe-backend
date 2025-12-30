@@ -10,7 +10,8 @@ if (fs.existsSync(envPath)) {
 
 const required = (key, fallback) => {
   const value = process.env[key] ?? fallback;
-  if (value === undefined || value === null || String(value).trim() === "") {
+  if (value === undefined || value === null) {
+    //  || String(value).trim() === ""
     throw new Error(`Missing required environment variable: ${key}`);
   }
   return value;
@@ -24,7 +25,7 @@ module.exports = {
     port: Number(process.env.DB_PORT || 3306),
     user: required("DB_USER", "root"),
     password: required("DB_PASSWORD", ""),
-    database: required("DB_NAME", "church_cafe"),
+    database: required("DB_NAME", "church_cafe_db"),
   },
   auth: {
     jwtSecret: required("JWT_SECRET", "change_this_secret"),

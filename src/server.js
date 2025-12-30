@@ -34,6 +34,7 @@ app.use("/api/orders", orderRoutes);
 
 // 404 handler
 app.use((req, res, next) => {
+  console.log("404", req?.url);
   res.status(404).json({ error: "Not Found" });
 });
 

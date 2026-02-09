@@ -15,7 +15,23 @@ router.get("/", async (req, res, next) => {
        FROM products p LEFT JOIN categories c ON p.category_id = c.id
        ${category_id ? "WHERE p.category_id = ?" : ""}
        ORDER BY p.name ASC`,
-      category_id ? [category_id] : []
+      category_id ? [category_id] : [],
+    );
+    return res.json(rows);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// Public: list all product items
+router.get("/items", async (_req, res, next) => {
+  try {
+    const pool = getPool();
+    const [rows] = await pool.query(
+      `SELECT id, product_id, name, sku, price, available
+       FROM product_items
+       WHERE available = 1
+       ORDER BY name ASC`,
     );
     return res.json(rows);
   } catch (err) {
@@ -34,11 +50,11 @@ router.get("/:id", async (req, res, next) => {
     const product = products[0];
     const [items] = await pool.query(
       "SELECT * FROM product_items WHERE product_id = ? AND available = 1",
-      [product.id]
+      [product.id],
     );
     const [options] = await pool.query(
       "SELECT * FROM product_options WHERE product_id = ?",
-      [product.id]
+      [product.id],
     );
     return res.json({ ...product, items, options });
   } catch (err) {
@@ -73,7 +89,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
           base_price || null,
           image_url || null,
           available !== false,
-        ]
+        ],
       );
       const productId = r.insertId;
       if (Array.isArray(items) && items.length) {
@@ -86,7 +102,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
         ]);
         await conn.query(
           "INSERT INTO product_items (product_id, name, sku, price, available) VALUES ?",
-          [values]
+          [values],
         );
       }
       if (Array.isArray(options) && options.length) {
@@ -98,7 +114,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
         ]);
         await conn.query(
           "INSERT INTO product_options (product_id, name, value, extra_price) VALUES ?",
-          [values]
+          [values],
         );
       }
       return productId;
@@ -134,7 +150,7 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
           image_url || null,
           available,
           productId,
-        ]
+        ],
       );
       if (Array.isArray(items)) {
         await conn.query("DELETE FROM product_items WHERE product_id = ?", [
@@ -150,7 +166,7 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
           ]);
           await conn.query(
             "INSERT INTO product_items (product_id, name, sku, price, available) VALUES ?",
-            [values]
+            [values],
           );
         }
       }
@@ -167,7 +183,7 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
           ]);
           await conn.query(
             "INSERT INTO product_options (product_id, name, value, extra_price) VALUES ?",
-            [values]
+            [values],
           );
         }
       }
@@ -198,7 +214,7 @@ router.post("/:id/items", requireRole("admin"), async (req, res, next) => {
     const pool = getPool();
     const [r] = await pool.query(
       "INSERT INTO product_items (product_id, name, sku, price, available) VALUES (?, ?, ?, ?, ?)",
-      [productId, name, sku || null, price || null, available !== false]
+      [productId, name, sku || null, price || null, available !== false],
     );
     return res.status(201).json({ id: r.insertId });
   } catch (err) {
@@ -212,7 +228,7 @@ router.put("/items/:itemId", requireRole("admin"), async (req, res, next) => {
     const pool = getPool();
     await pool.query(
       "UPDATE product_items SET name = COALESCE(?, name), sku = COALESCE(?, sku), price = COALESCE(?, price), available = COALESCE(?, available) WHERE id = ?",
-      [name || null, sku || null, price ?? null, available, req.params.itemId]
+      [name || null, sku || null, price ?? null, available, req.params.itemId],
     );
     return res.json({ success: true });
   } catch (err) {
@@ -233,7 +249,7 @@ router.delete(
     } catch (err) {
       return next(err);
     }
-  }
+  },
 );
 
 // Admin: manage options
@@ -246,7 +262,7 @@ router.post("/:id/options", requireRole("admin"), async (req, res, next) => {
     const pool = getPool();
     const [r] = await pool.query(
       "INSERT INTO product_options (product_id, name, value, extra_price) VALUES (?, ?, ?, ?)",
-      [productId, name, value, extra_price || 0]
+      [productId, name, value, extra_price || 0],
     );
     return res.status(201).json({ id: r.insertId });
   } catch (err) {
@@ -263,13 +279,13 @@ router.put(
       const pool = getPool();
       await pool.query(
         "UPDATE product_options SET name = COALESCE(?, name), value = COALESCE(?, value), extra_price = COALESCE(?, extra_price) WHERE id = ?",
-        [name || null, value || null, extra_price ?? null, req.params.optionId]
+        [name || null, value || null, extra_price ?? null, req.params.optionId],
       );
       return res.json({ success: true });
     } catch (err) {
       return next(err);
     }
-  }
+  },
 );
 
 router.delete(
@@ -285,7 +301,7 @@ router.delete(
     } catch (err) {
       return next(err);
     }
-  }
+  },
 );
 
 module.exports = router;

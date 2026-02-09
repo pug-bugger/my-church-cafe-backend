@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS orders (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT,
     total DECIMAL(10,2),
-    status ENUM('pending', 'paid', 'cancelled', 'completed') DEFAULT 'pending',
+    status ENUM('pending', 'preparing', 'ready', 'paid', 'cancelled', 'completed') DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 );

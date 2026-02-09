@@ -1,7 +1,10 @@
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
-const { port, nodeEnv } = require("./config/env");
+const http = require("http");
+const { Server } = require("socket.io");
+const { verifyJwt } = require("./utils/jwt");
+const { port, nodeEnv, corsOrigin } = require("./config/env");
 const authRoutes = require("./routes/auth");
 const userRoutes = require("./routes/users");
 const categoryRoutes = require("./routes/categories");
@@ -9,9 +12,58 @@ const productRoutes = require("./routes/products");
 const orderRoutes = require("./routes/orders");
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: corsOrigin, credentials: true },
+});
+
+// Make io available inside route handlers (req.app.get("io"))
+app.set("io", io);
+
+// Socket auth via JWT: send `auth: { token }` or `Authorization: Bearer <token>`
+io.use((socket, next) => {
+  console.log("socket.handshake", socket.handshake);
+  const tokenFromAuth = socket.handshake.auth?.token;
+  const header = socket.handshake.headers?.authorization;
+  const tokenFromHeader =
+    typeof header === "string" && header.startsWith("Bearer ")
+      ? header.slice("Bearer ".length)
+      : undefined;
+  const token = tokenFromAuth || tokenFromHeader;
+  if (!token) {
+    const err = new Error("Unauthorized");
+    err.data = { code: "UNAUTHORIZED" };
+    return next(err);
+  }
+  try {
+    const user = verifyJwt(token);
+    socket.data.user = user;
+    return next();
+  } catch (_e) {
+    const err = new Error("Unauthorized");
+    err.data = { code: "UNAUTHORIZED" };
+    return next(err);
+  }
+});
+
+io.on("connection", (socket) => {
+  console.log("socket.connection", socket);
+  const user = socket.data.user;
+  // Per-user room
+  if (user?.id) socket.join(`user:${user.id}`);
+  // Staff room (admin + personal)
+  if (user?.role === "admin" || user?.role === "personal") {
+    socket.join("staff");
+  }
+
+  socket.emit("socket:ready", {
+    userId: user?.id,
+    role: user?.role,
+  });
+});
 
 // Middleware
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json());
 app.use(morgan(nodeEnv === "production" ? "combined" : "dev"));
 
@@ -46,6 +98,6 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: err.message || "Internal Server Error" });
 });
 
-app.listen(port, () => {
+server.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
 });

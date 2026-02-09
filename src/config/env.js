@@ -17,9 +17,25 @@ const required = (key, fallback) => {
   return value;
 };
 
+const parseCorsOrigin = () => {
+  const raw = process.env.CORS_ORIGIN;
+  // If not set, keep previous permissive behavior.
+  if (!raw) return true;
+  const trimmed = String(raw).trim();
+  if (!trimmed || trimmed === "*") return true;
+  // Comma-separated list of allowed origins
+  const parts = trimmed
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return true;
+  return parts.length === 1 ? parts[0] : parts;
+};
+
 module.exports = {
   nodeEnv: process.env.NODE_ENV || "development",
   port: Number(process.env.PORT || 4000),
+  corsOrigin: parseCorsOrigin(),
   db: {
     host: required("DB_HOST", "localhost"),
     port: Number(process.env.DB_PORT || 3306),

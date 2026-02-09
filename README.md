@@ -28,6 +28,15 @@ Server runs on http://localhost:4000
 
 Auth via Bearer token. Roles: `admin`, `personal`, `parishioner`.
 
+## Realtime (Socket.IO)
+
+This backend also exposes a Socket.IO server on the **same base URL/port** as the REST API.
+
+- **Socket endpoint**: `http://localhost:4000` (default)
+- **Path**: `/socket.io` (default)
+- **Auth**: required (JWT). Send as `auth: { token }` or header `Authorization: Bearer <token>`.
+- **Docs for frontend usage**: see `SOCKETS.md`
+
 ## Notes
 
 - Passwords hashed with bcrypt.

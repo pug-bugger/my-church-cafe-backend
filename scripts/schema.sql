@@ -75,11 +75,11 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS order_items (
     id INT AUTO_INCREMENT PRIMARY KEY,
     order_id INT,
-    product_item_id INT,
+    product_id INT,
     quantity INT DEFAULT 1,
     price DECIMAL(10,2),
     FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
-    FOREIGN KEY (product_item_id) REFERENCES product_items(id) ON DELETE SET NULL
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
 );
 
 -- Insert Default Roles

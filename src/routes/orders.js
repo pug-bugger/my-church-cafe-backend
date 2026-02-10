@@ -6,15 +6,26 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
+let cachedOrderItemProductColumn = null;
+
+const getOrderItemProductColumn = async (pool) => {
+  if (cachedOrderItemProductColumn) return cachedOrderItemProductColumn;
+  const [cols] = await pool.query(
+    "SHOW COLUMNS FROM order_items LIKE 'product_id'",
+  );
+  cachedOrderItemProductColumn = cols.length ? "product_id" : "product_item_id";
+  return cachedOrderItemProductColumn;
+};
+
 const attachOrderItems = async (pool, orders) => {
   if (!orders.length) return orders;
   const orderIds = orders.map((order) => order.id);
   const [items] = await pool.query(
-    `SELECT oi.id, oi.order_id, oi.product_item_id, oi.quantity, oi.price,
-            pi.name AS product_item_name
-     FROM order_items oi
-     LEFT JOIN product_items pi ON oi.product_item_id = pi.id
-     WHERE oi.order_id IN (?)`,
+    `SELECT oi.id, oi.order_id, oi.product_id, oi.quantity, oi.price,
+                  p.name AS product_item_name
+           FROM order_items oi
+           LEFT JOIN products p ON oi.product_id = p.id
+           WHERE oi.order_id IN (?)`,
     [orderIds],
   );
   const itemsByOrder = new Map();
@@ -28,34 +39,148 @@ const attachOrderItems = async (pool, orders) => {
   }));
 };
 
-// Create order from items: [{ product_item_id, quantity }]
+// Create order from items: [{ quantity, product: { id } }]
 router.post("/", async (req, res, next) => {
   try {
-    const { items } = req.body;
+    const orderPayload = req.body?.order ?? req.body ?? {};
+    const items = orderPayload.order_items ?? orderPayload.items ?? [];
+
     if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: "items required" });
+      return res
+        .status(400)
+        .json({ error: "order without items is not allowed" });
     }
 
     const created = await withTransaction(async (conn) => {
-      // Load item prices
-      const ids = items.map((i) => i.product_item_id);
+      const productColumn = await getOrderItemProductColumn(conn);
+
+      const normalizedItems = items.map((item) => {
+        const quantity = Math.max(1, Number(item.quantity || 1));
+        const productId =
+          item.product_id ??
+          item.productId ??
+          item.product?.id ??
+          (typeof item.product === "number" ? item.product : null);
+        return {
+          quantity,
+          productId,
+        };
+      });
+
+      console.log("productColumn", productColumn);
+
+      if (productColumn === "product_id") {
+        const productIds = normalizedItems
+          .map((it) => it.productId)
+          .filter((id) => Number.isFinite(Number(id)));
+        if (productIds.length !== normalizedItems.length) {
+          throw Object.assign(new Error("Invalid product"), { status: 400 });
+        }
+        const [productRows] = await conn.query(
+          "SELECT id, base_price FROM products WHERE id IN (?)",
+          [productIds],
+        );
+        console.log("productRows", productRows);
+
+        const basePriceById = new Map(
+          productRows.map((row) => [row.id, Number(row.base_price || 0)]),
+        );
+        // Calculate total
+        let total = 0;
+        for (const it of normalizedItems) {
+          const basePrice = basePriceById.get(it.productId);
+          if (basePrice === undefined) {
+            throw Object.assign(new Error("Invalid product"), { status: 400 });
+          }
+          total += basePrice * it.quantity;
+        }
+
+        console.log("total", total);
+
+        const [orderRes] = await conn.query(
+          "INSERT INTO orders (user_id, total, status) VALUES (?, ?, ?)",
+          [req.user.id, total, "pending"],
+        );
+        console.log("orderRes inserted");
+
+        const newOrderId = orderRes.insertId;
+
+        const orderItemValues = normalizedItems.map((it) => [
+          newOrderId,
+          it.productId,
+          it.quantity,
+          basePriceById.get(it.productId),
+        ]);
+        console.log("orderItemValues", orderItemValues);
+        await conn.query(
+          "INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ?",
+          [orderItemValues],
+        );
+
+        return { id: newOrderId, total };
+      }
+
+      const candidateItemIds = normalizedItems.map(() => []);
+      const missingProductIds = normalizedItems
+        .filter(
+          (_it, idx) =>
+            !Number.isFinite(Number(candidateItemIds[idx])) &&
+            Number.isFinite(Number(normalizedItems[idx].productId)),
+        )
+        .map((it) => it.productId);
+      const fallbackByProductId = new Map();
+      if (missingProductIds.length) {
+        const [fallbackRows] = await conn.query(
+          "SELECT id, product_id, base_price FROM products WHERE product_id IN (?) ORDER BY id ASC",
+          [missingProductIds],
+        );
+        for (const row of fallbackRows) {
+          if (!fallbackByProductId.has(row.product_id)) {
+            fallbackByProductId.set(row.product_id, {
+              id: row.id,
+              price: Number(row.base_price || 0),
+            });
+          }
+        }
+      }
+      const finalItemIds = candidateItemIds.map((id, idx) => {
+        if (Number.isFinite(Number(id))) return Number(id);
+        const productId = normalizedItems[idx].productId;
+        const fallback = fallbackByProductId.get(productId);
+        return fallback?.id ?? null;
+      });
+
+      if (finalItemIds.some((id) => !Number.isFinite(Number(id)))) {
+        finalItemIds.forEach((id) => {
+          console.log("invalid id", id);
+          console.log(!Number.isFinite(Number(id)));
+        });
+
+        throw Object.assign(new Error("Invalid product_id"), {
+          status: 400,
+        });
+      }
+
       const [rows] = await conn.query(
-        `SELECT id, price FROM product_items WHERE id IN (?)`,
-        [ids],
+        "SELECT id, base_price FROM products WHERE id IN (?)",
+        [finalItemIds],
       );
-      const priceById = new Map(rows.map((r) => [r.id, Number(r.price || 0)]));
+      const basePriceById = new Map(
+        rows.map((r) => [r.id, Number(r.base_price || 0)]),
+      );
 
       // Calculate total
       let total = 0;
-      for (const it of items) {
-        const price = priceById.get(it.product_item_id);
-        if (price === undefined) {
-          throw Object.assign(new Error("Invalid product_item_id"), {
+      for (let i = 0; i < normalizedItems.length; i += 1) {
+        const it = normalizedItems[i];
+        const primaryId = finalItemIds[i];
+        const basePrice = basePriceById.get(primaryId);
+        if (basePrice === undefined) {
+          throw Object.assign(new Error("Price not found for product_id"), {
             status: 400,
           });
         }
-        const qty = Math.max(1, Number(it.quantity || 1));
-        total += price * qty;
+        total += basePrice * it.quantity;
       }
 
       const [orderRes] = await conn.query(
@@ -64,12 +189,10 @@ router.post("/", async (req, res, next) => {
       );
       const newOrderId = orderRes.insertId;
 
-      const orderItemValues = items.map((it) => [
-        newOrderId,
-        it.product_item_id,
-        Math.max(1, Number(it.quantity || 1)),
-        priceById.get(it.product_item_id),
-      ]);
+      const orderItemValues = normalizedItems.map((it, idx) => {
+        const primaryId = finalItemIds[idx];
+        return [newOrderId, primaryId, it.quantity, priceById.get(primaryId)];
+      });
       await conn.query(
         "INSERT INTO order_items (order_id, product_item_id, quantity, price) VALUES ?",
         [orderItemValues],
@@ -130,12 +253,21 @@ router.get("/:id", async (req, res, next) => {
     ) {
       return res.status(403).json({ error: "Forbidden" });
     }
-    const [items] = await pool.query(
-      `SELECT oi.id, oi.quantity, oi.price, pi.name AS product_item_name
-       FROM order_items oi LEFT JOIN product_items pi ON oi.product_item_id = pi.id
-       WHERE oi.order_id = ?`,
-      [order.id],
-    );
+    const productColumn = await getOrderItemProductColumn(pool);
+    const [items] =
+      productColumn === "product_id"
+        ? await pool.query(
+            `SELECT oi.id, oi.quantity, oi.price, p.name AS product_item_name
+             FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id
+             WHERE oi.order_id = ?`,
+            [order.id],
+          )
+        : await pool.query(
+            `SELECT oi.id, oi.quantity, oi.price, pi.name AS product_item_name
+             FROM order_items oi LEFT JOIN product_items pi ON oi.product_item_id = pi.id
+             WHERE oi.order_id = ?`,
+            [order.id],
+          );
     return res.json({ ...order, items });
   } catch (err) {
     return next(err);

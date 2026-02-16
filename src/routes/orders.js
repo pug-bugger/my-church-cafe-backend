@@ -222,12 +222,21 @@ router.post("/", async (req, res, next) => {
   }
 });
 
+// Order number: 1-based index per calendar day (resets each day)
+const orderNumberSubquery = `(SELECT COUNT(*) FROM orders o2
+  WHERE DATE(o2.created_at) = DATE(o.created_at)
+    AND (o2.created_at < o.created_at OR (o2.created_at = o.created_at AND o2.id <= o.id))
+) AS order_number`;
+
 // Get my orders
 router.get("/me", async (req, res, next) => {
   try {
     const pool = getPool();
     const [orders] = await pool.query(
-      "SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT o.*, ${orderNumberSubquery}
+       FROM orders o
+       WHERE o.user_id = ?
+       ORDER BY o.created_at DESC`,
       [req.user.id],
     );
     const withItems = await attachOrderItems(pool, orders);
@@ -241,9 +250,10 @@ router.get("/me", async (req, res, next) => {
 router.get("/:id", async (req, res, next) => {
   try {
     const pool = getPool();
-    const [orders] = await pool.query("SELECT * FROM orders WHERE id = ?", [
-      req.params.id,
-    ]);
+    const [orders] = await pool.query(
+      `SELECT o.*, ${orderNumberSubquery} FROM orders o WHERE o.id = ?`,
+      [req.params.id],
+    );
     if (!orders.length) return res.status(404).json({ error: "Not found" });
     const order = orders[0];
     if (
@@ -279,7 +289,7 @@ router.get("/", requireRole("admin", "personal"), async (_req, res, next) => {
   try {
     const pool = getPool();
     const [orders] = await pool.query(
-      `SELECT o.*, u.name as user_name, u.email as user_email
+      `SELECT o.*, u.name as user_name, u.email as user_email, ${orderNumberSubquery}
        FROM orders o LEFT JOIN users u ON o.user_id = u.id
        ORDER BY o.created_at DESC`,
     );

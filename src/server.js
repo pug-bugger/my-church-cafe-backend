@@ -22,7 +22,6 @@ app.set("io", io);
 
 // Socket auth via JWT: send `auth: { token }` or `Authorization: Bearer <token>`
 io.use((socket, next) => {
-  // console.log("socket.handshake", socket.handshake);
   const tokenFromAuth = socket.handshake.auth?.token;
   const header = socket.handshake.headers?.authorization;
   const tokenFromHeader =

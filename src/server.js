@@ -1,3 +1,4 @@
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
@@ -9,6 +10,7 @@ const authRoutes = require("./routes/auth");
 const userRoutes = require("./routes/users");
 const categoryRoutes = require("./routes/categories");
 const productRoutes = require("./routes/products");
+const drinkOptionRoutes = require("./routes/drinkOptions");
 const orderRoutes = require("./routes/orders");
 
 const app = express();
@@ -63,6 +65,10 @@ io.on("connection", (socket) => {
 
 // Middleware
 app.use(cors({ origin: corsOrigin, credentials: true }));
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "../uploads")),
+);
 app.use(express.json());
 app.use(morgan(nodeEnv === "production" ? "combined" : "dev"));
 
@@ -81,6 +87,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/products", productRoutes);
+app.use("/api/drink-options", drinkOptionRoutes);
 app.use("/api/orders", orderRoutes);
 
 // 404 handler.

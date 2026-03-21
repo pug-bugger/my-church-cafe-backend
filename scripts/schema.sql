@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS products (
     FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
 );
 
--- Product Options Table
+-- Legacy per-product flat options (older API; new flows use drink_option_* tables below)
 CREATE TABLE IF NOT EXISTS product_options (
     id INT AUTO_INCREMENT PRIMARY KEY,
     product_id INT,
@@ -48,6 +48,38 @@ CREATE TABLE IF NOT EXISTS product_options (
     value VARCHAR(50) NOT NULL,
     extra_price DECIMAL(10,2) DEFAULT 0,
     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+);
+
+-- Reusable drink option definitions (admin creates first, then assigns to products)
+CREATE TABLE IF NOT EXISTS drink_option_definitions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    option_key VARCHAR(64) NOT NULL UNIQUE,
+    type ENUM('checkbox', 'select') NOT NULL DEFAULT 'select',
+    checkbox_extra_price DECIMAL(10,2) DEFAULT 0,
+    sort_order INT DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Picklist / radio choices for select-type options
+CREATE TABLE IF NOT EXISTS drink_option_values (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    option_definition_id INT NOT NULL,
+    label VARCHAR(100) NOT NULL,
+    extra_price DECIMAL(10,2) DEFAULT 0,
+    sort_order INT DEFAULT 0,
+    FOREIGN KEY (option_definition_id) REFERENCES drink_option_definitions(id) ON DELETE CASCADE
+);
+
+-- Which products use which reusable options (order follows sort_order)
+CREATE TABLE IF NOT EXISTS product_drink_options (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    product_id INT NOT NULL,
+    option_definition_id INT NOT NULL,
+    sort_order INT DEFAULT 0,
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+    FOREIGN KEY (option_definition_id) REFERENCES drink_option_definitions(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_product_drink_option (product_id, option_definition_id)
 );
 
 -- Product Items Table

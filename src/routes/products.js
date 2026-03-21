@@ -1,10 +1,53 @@
 const express = require("express");
+const path = require("path");
+const fs = require("fs");
+const multer = require("multer");
 const { getPool, withTransaction } = require("../config/db");
 const { authMiddleware, requireRole } = require("../middleware/auth");
+const {
+  fetchDrinkOptionsForProducts,
+  normalizeDrinkOptionsList,
+} = require("../utils/drinkOptionsForProducts");
 
 const router = express.Router();
 
-// Public: list products with category
+const uploadDir = path.join(__dirname, "../../uploads/products");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname) || ".jpg";
+    cb(null, `product-${req.params.id}-${Date.now()}${ext}`);
+  },
+});
+
+const uploadImage = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!/^image\/(jpeg|png|gif|webp)$/i.test(file.mimetype)) {
+      const err = new Error("Only JPEG, PNG, GIF, or WebP images are allowed");
+      err.status = 400;
+      return cb(err);
+    }
+    cb(null, true);
+  },
+});
+
+async function attachDrinkOptions(pool, productRows) {
+  if (!productRows.length) return productRows;
+  const ids = productRows.map((p) => p.id);
+  const map = await fetchDrinkOptionsForProducts(pool, ids);
+  return productRows.map((p) => ({
+    ...p,
+    drink_options: normalizeDrinkOptionsList(map.get(p.id) || []),
+  }));
+}
+
+// Public: list products with category and drink options
 router.get("/", async (req, res, next) => {
   try {
     const { category_id } = req.query;
@@ -17,7 +60,8 @@ router.get("/", async (req, res, next) => {
        ORDER BY p.name ASC`,
       category_id ? [category_id] : [],
     );
-    return res.json(rows);
+    const withOptions = await attachDrinkOptions(pool, rows);
+    return res.json(withOptions);
   } catch (err) {
     return next(err);
   }
@@ -39,7 +83,7 @@ router.get("/items", async (_req, res, next) => {
   }
 });
 
-// Public: get product with items and options
+// Public: get product with items and drink options
 router.get("/:id", async (req, res, next) => {
   try {
     const pool = getPool();
@@ -52,11 +96,8 @@ router.get("/:id", async (req, res, next) => {
       "SELECT * FROM product_items WHERE product_id = ? AND available = 1",
       [product.id],
     );
-    const [options] = await pool.query(
-      "SELECT * FROM product_options WHERE product_id = ?",
-      [product.id],
-    );
-    return res.json({ ...product, items, options });
+    const [withOpts] = await attachDrinkOptions(pool, [product]);
+    return res.json({ ...withOpts, items });
   } catch (err) {
     return next(err);
   }
@@ -64,6 +105,74 @@ router.get("/:id", async (req, res, next) => {
 
 // Protected writes
 router.use(authMiddleware);
+
+// Admin: upload / replace product image
+router.post(
+  "/:id/image",
+  requireRole("admin"),
+  uploadImage.single("image"),
+  async (req, res, next) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No image file (field name: image)" });
+      }
+      const pool = getPool();
+      const relativeUrl = `/uploads/products/${req.file.filename}`;
+      const [products] = await pool.query(
+        "SELECT id, image_url FROM products WHERE id = ?",
+        [req.params.id],
+      );
+      if (!products.length) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (_e) {
+          /* ignore */
+        }
+        return res.status(404).json({ error: "Product not found" });
+      }
+      const prev = products[0].image_url;
+      if (
+        prev &&
+        typeof prev === "string" &&
+        prev.startsWith("/uploads/products/")
+      ) {
+        const oldPath = path.join(
+          __dirname,
+          "../..",
+          prev.replace(/^\//, ""),
+        );
+        try {
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        } catch (_e) {
+          /* ignore */
+        }
+      }
+      await pool.query("UPDATE products SET image_url = ? WHERE id = ?", [
+        relativeUrl,
+        req.params.id,
+      ]);
+      return res.json({ image_url: relativeUrl });
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
+
+async function syncProductDrinkOptions(conn, productId, definitionIds) {
+  if (!Array.isArray(definitionIds)) return;
+  await conn.query("DELETE FROM product_drink_options WHERE product_id = ?", [
+    productId,
+  ]);
+  const ids = definitionIds
+    .map((x) => Number(x))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (!ids.length) return;
+  const rows = ids.map((defId, i) => [productId, defId, i]);
+  await conn.query(
+    "INSERT INTO product_drink_options (product_id, option_definition_id, sort_order) VALUES ?",
+    [rows],
+  );
+}
 
 // Admin: create product
 router.post("/", requireRole("admin"), async (req, res, next) => {
@@ -76,7 +185,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
       image_url,
       available,
       items,
-      options,
+      drink_option_definition_ids,
     } = req.body;
     if (!name) return res.status(400).json({ error: "name required" });
     const result = await withTransaction(async (conn) => {
@@ -105,18 +214,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
           [values],
         );
       }
-      if (Array.isArray(options) && options.length) {
-        const values = options.map((op) => [
-          productId,
-          op.name,
-          op.value,
-          op.extra_price || 0,
-        ]);
-        await conn.query(
-          "INSERT INTO product_options (product_id, name, value, extra_price) VALUES ?",
-          [values],
-        );
-      }
+      await syncProductDrinkOptions(conn, productId, drink_option_definition_ids);
       return productId;
     });
     return res.status(201).json({ id: result });
@@ -125,7 +223,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
   }
 });
 
-// Admin: update product and optionally replace items/options
+// Admin: update product
 router.put("/:id", requireRole("admin"), async (req, res, next) => {
   try {
     const {
@@ -136,7 +234,7 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
       image_url,
       available,
       items,
-      options,
+      drink_option_definition_ids,
     } = req.body;
     const productId = req.params.id;
     await withTransaction(async (conn) => {
@@ -170,22 +268,8 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
           );
         }
       }
-      if (Array.isArray(options)) {
-        await conn.query("DELETE FROM product_options WHERE product_id = ?", [
-          productId,
-        ]);
-        if (options.length) {
-          const values = options.map((op) => [
-            productId,
-            op.name,
-            op.value,
-            op.extra_price || 0,
-          ]);
-          await conn.query(
-            "INSERT INTO product_options (product_id, name, value, extra_price) VALUES ?",
-            [values],
-          );
-        }
+      if (Array.isArray(drink_option_definition_ids)) {
+        await syncProductDrinkOptions(conn, productId, drink_option_definition_ids);
       }
     });
     return res.json({ success: true });
@@ -194,7 +278,7 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
   }
 });
 
-// Admin: delete product (cascade deletes items/options)
+// Admin: delete product
 router.delete("/:id", requireRole("admin"), async (req, res, next) => {
   try {
     const pool = getPool();
@@ -244,58 +328,6 @@ router.delete(
       const pool = getPool();
       await pool.query("DELETE FROM product_items WHERE id = ?", [
         req.params.itemId,
-      ]);
-      return res.status(204).send();
-    } catch (err) {
-      return next(err);
-    }
-  },
-);
-
-// Admin: manage options
-router.post("/:id/options", requireRole("admin"), async (req, res, next) => {
-  try {
-    const productId = req.params.id;
-    const { name, value, extra_price } = req.body;
-    if (!name || !value)
-      return res.status(400).json({ error: "name and value required" });
-    const pool = getPool();
-    const [r] = await pool.query(
-      "INSERT INTO product_options (product_id, name, value, extra_price) VALUES (?, ?, ?, ?)",
-      [productId, name, value, extra_price || 0],
-    );
-    return res.status(201).json({ id: r.insertId });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-router.put(
-  "/options/:optionId",
-  requireRole("admin"),
-  async (req, res, next) => {
-    try {
-      const { name, value, extra_price } = req.body;
-      const pool = getPool();
-      await pool.query(
-        "UPDATE product_options SET name = COALESCE(?, name), value = COALESCE(?, value), extra_price = COALESCE(?, extra_price) WHERE id = ?",
-        [name || null, value || null, extra_price ?? null, req.params.optionId],
-      );
-      return res.json({ success: true });
-    } catch (err) {
-      return next(err);
-    }
-  },
-);
-
-router.delete(
-  "/options/:optionId",
-  requireRole("admin"),
-  async (req, res, next) => {
-    try {
-      const pool = getPool();
-      await pool.query("DELETE FROM product_options WHERE id = ?", [
-        req.params.optionId,
       ]);
       return res.status(204).send();
     } catch (err) {

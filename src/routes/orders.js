@@ -17,6 +17,111 @@ const getOrderItemProductColumn = async (pool) => {
   return cachedOrderItemProductColumn;
 };
 
+/** Attach product_item_options[] to each order item (for barista UI). */
+async function enrichItemsWithOptions(pool, items) {
+  if (!items.length) return;
+  const itemIds = items.map((row) => row.id);
+  let opts = [];
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, order_item_id, option_definition_name, option_value_name
+       FROM order_item_options
+       WHERE order_item_id IN (?)
+       ORDER BY id ASC`,
+      [itemIds],
+    );
+    opts = rows;
+  } catch (err) {
+    if (err && err.code === "ER_NO_SUCH_TABLE") {
+      for (const item of items) {
+        item.product_item_options = [];
+      }
+      return;
+    }
+    throw err;
+  }
+  const byItem = new Map();
+  for (const o of opts) {
+    if (!byItem.has(o.order_item_id)) byItem.set(o.order_item_id, []);
+    byItem.get(o.order_item_id).push({
+      id: o.id,
+      option_definition_name: o.option_definition_name,
+      option_value_name: o.option_value_name,
+    });
+  }
+  for (const item of items) {
+    item.product_item_options = byItem.get(item.id) || [];
+  }
+}
+
+async function insertOrderItemOptions(conn, orderItemId, selectedOptions) {
+  if (
+    !selectedOptions ||
+    typeof selectedOptions !== "object" ||
+    Array.isArray(selectedOptions)
+  ) {
+    return;
+  }
+  const entries = Object.entries(selectedOptions).filter(
+    ([, v]) => v != null && String(v).length > 0,
+  );
+  if (!entries.length) return;
+  const defIds = entries
+    .map(([k]) => Number.parseInt(String(k), 10))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (!defIds.length) return;
+  let defs = [];
+  try {
+    const [rows] = await conn.query(
+      `SELECT id, name, type FROM drink_option_definitions WHERE id IN (?)`,
+      [defIds],
+    );
+    defs = rows;
+  } catch (err) {
+    if (err && err.code === "ER_NO_SUCH_TABLE") return;
+    throw err;
+  }
+  const defById = new Map(defs.map((d) => [d.id, d]));
+  const valueRows = [];
+  for (const [defIdStr, rawVal] of entries) {
+    const defId = Number.parseInt(String(defIdStr), 10);
+    if (!Number.isFinite(defId) || defId <= 0) continue;
+    const def = defById.get(defId);
+    if (!def) continue;
+    const val = String(rawVal);
+    if (def.type === "checkbox") {
+      if (val !== "true") continue;
+      valueRows.push([orderItemId, defId, def.name, "Yes"]);
+    } else {
+      valueRows.push([orderItemId, defId, def.name, val]);
+    }
+  }
+  if (!valueRows.length) return;
+  try {
+    await conn.query(
+      `INSERT INTO order_item_options
+        (order_item_id, drink_option_definition_id, option_definition_name, option_value_name)
+       VALUES ?`,
+      [valueRows],
+    );
+  } catch (err) {
+    if (err && err.code === "ER_NO_SUCH_TABLE") return;
+    throw err;
+  }
+}
+
+async function persistOptionsForNewOrder(conn, newOrderId, normalizedItems) {
+  const [orderItemRows] = await conn.query(
+    "SELECT id FROM order_items WHERE order_id = ? ORDER BY id ASC",
+    [newOrderId],
+  );
+  for (let i = 0; i < normalizedItems.length; i += 1) {
+    const row = orderItemRows[i];
+    if (!row) break;
+    await insertOrderItemOptions(conn, row.id, normalizedItems[i].selectedOptions);
+  }
+}
+
 const attachOrderItems = async (pool, orders) => {
   if (!orders.length) return orders;
   const orderIds = orders.map((order) => order.id);
@@ -28,6 +133,7 @@ const attachOrderItems = async (pool, orders) => {
            WHERE oi.order_id IN (?)`,
     [orderIds],
   );
+  await enrichItemsWithOptions(pool, items);
   const itemsByOrder = new Map();
   for (const item of items) {
     if (!itemsByOrder.has(item.order_id)) itemsByOrder.set(item.order_id, []);
@@ -61,9 +167,18 @@ router.post("/", async (req, res, next) => {
           item.productId ??
           item.product?.id ??
           (typeof item.product === "number" ? item.product : null);
+        const rawOpts =
+          item.selectedOptions ?? item.selected_options ?? item.options ?? {};
+        const selectedOptions =
+          rawOpts &&
+          typeof rawOpts === "object" &&
+          !Array.isArray(rawOpts)
+            ? rawOpts
+            : {};
         return {
           quantity,
           productId,
+          selectedOptions,
         };
       });
 
@@ -116,6 +231,8 @@ router.post("/", async (req, res, next) => {
           "INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ?",
           [orderItemValues],
         );
+
+        await persistOptionsForNewOrder(conn, newOrderId, normalizedItems);
 
         return { id: newOrderId, total };
       }
@@ -191,12 +308,19 @@ router.post("/", async (req, res, next) => {
 
       const orderItemValues = normalizedItems.map((it, idx) => {
         const primaryId = finalItemIds[idx];
-        return [newOrderId, primaryId, it.quantity, priceById.get(primaryId)];
+        return [
+          newOrderId,
+          primaryId,
+          it.quantity,
+          basePriceById.get(primaryId),
+        ];
       });
       await conn.query(
         "INSERT INTO order_items (order_id, product_item_id, quantity, price) VALUES ?",
         [orderItemValues],
       );
+
+      await persistOptionsForNewOrder(conn, newOrderId, normalizedItems);
 
       return { id: newOrderId, total };
     });
@@ -267,17 +391,18 @@ router.get("/:id", async (req, res, next) => {
     const [items] =
       productColumn === "product_id"
         ? await pool.query(
-            `SELECT oi.id, oi.quantity, oi.price, p.name AS product_item_name
+            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, p.name AS product_item_name
              FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id
              WHERE oi.order_id = ?`,
             [order.id],
           )
         : await pool.query(
-            `SELECT oi.id, oi.quantity, oi.price, pi.name AS product_item_name
+            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, pi.name AS product_item_name
              FROM order_items oi LEFT JOIN product_items pi ON oi.product_item_id = pi.id
              WHERE oi.order_id = ?`,
             [order.id],
           );
+    await enrichItemsWithOptions(pool, items);
     return res.json({ ...order, items });
   } catch (err) {
     return next(err);

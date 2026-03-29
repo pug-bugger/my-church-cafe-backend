@@ -114,6 +114,17 @@ CREATE TABLE IF NOT EXISTS order_items (
     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
 );
 
+-- Selected drink options at order time (for barista / receipts)
+CREATE TABLE IF NOT EXISTS order_item_options (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    order_item_id INT NOT NULL,
+    drink_option_definition_id INT NULL,
+    option_definition_name VARCHAR(100) NOT NULL,
+    option_value_name VARCHAR(100) NOT NULL,
+    FOREIGN KEY (order_item_id) REFERENCES order_items(id) ON DELETE CASCADE,
+    FOREIGN KEY (drink_option_definition_id) REFERENCES drink_option_definitions(id) ON DELETE SET NULL
+);
+
 -- Insert Default Roles
 INSERT INTO roles (name, description) VALUES
 ('admin', 'Full access'),

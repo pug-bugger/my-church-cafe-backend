@@ -55,7 +55,7 @@ router.post("/login", async (req, res, next) => {
     }
     const pool = getPool();
     const [rows] = await pool.query(
-      `SELECT u.id, u.name, u.email, u.password_hash, r.name AS role
+      `SELECT u.id, u.name, u.email, u.picture_url, u.password_hash, r.name AS role
        FROM users u LEFT JOIN roles r ON u.role_id = r.id WHERE u.email = ? LIMIT 1`,
       [email]
     );
@@ -79,6 +79,7 @@ router.post("/login", async (req, res, next) => {
         name: user.name,
         email: user.email,
         role: user.role || "parishioner",
+        picture_url: user.picture_url ?? null,
       },
     });
   } catch (err) {

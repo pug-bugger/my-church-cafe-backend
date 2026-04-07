@@ -32,10 +32,19 @@ const parseCorsOrigin = () => {
   return parts.length === 1 ? parts[0] : parts;
 };
 
+/** Max image upload size (MB) for multer; increase nginx/proxy limits to match or exceed this. */
+const uploadMaxImageMB = (() => {
+  const n = Number(process.env.UPLOAD_MAX_IMAGE_MB);
+  if (Number.isFinite(n) && n > 0) return Math.min(50, Math.max(1, n));
+  return 15;
+})();
+
 module.exports = {
   nodeEnv: process.env.NODE_ENV || "development",
   port: Number(process.env.PORT || 4000),
   corsOrigin: parseCorsOrigin(),
+  uploadMaxImageMB,
+  uploadMaxImageBytes: uploadMaxImageMB * 1024 * 1024,
   db: {
     host: required("DB_HOST", "localhost"),
     port: Number(process.env.DB_PORT || 3306),

@@ -4,6 +4,7 @@ const fs = require("fs");
 const multer = require("multer");
 const bcrypt = require("bcryptjs");
 const { getPool } = require("../config/db");
+const { uploadMaxImageBytes, uploadMaxImageMB } = require("../config/env");
 const { authMiddleware, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
@@ -24,7 +25,7 @@ const storage = multer.diskStorage({
 
 const uploadImage = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: uploadMaxImageBytes },
   fileFilter: (_req, file, cb) => {
     if (!/^image\/(jpeg|png|gif|webp)$/i.test(file.mimetype)) {
       const err = new Error("Only JPEG, PNG, GIF, or WebP images are allowed");

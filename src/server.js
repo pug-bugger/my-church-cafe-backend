@@ -5,7 +5,7 @@ const morgan = require("morgan");
 const http = require("http");
 const { Server } = require("socket.io");
 const { verifyJwt } = require("./utils/jwt");
-const { port, nodeEnv, corsOrigin } = require("./config/env");
+const { port, nodeEnv, corsOrigin, uploadMaxImageMB } = require("./config/env");
 const authRoutes = require("./routes/auth");
 const userRoutes = require("./routes/users");
 const categoryRoutes = require("./routes/categories");
@@ -100,6 +100,14 @@ app.use((req, res, next) => {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error(err); // In production consider structured logging
+  if (err && err.name === "MulterError") {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({
+        error: `Image too large (max ${uploadMaxImageMB} MB).`,
+      });
+    }
+    return res.status(400).json({ error: err.message || "Upload error" });
+  }
   const status = err.status || 500;
   res.status(status).json({ error: err.message || "Internal Server Error" });
 });

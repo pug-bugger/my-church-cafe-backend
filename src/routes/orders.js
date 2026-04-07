@@ -409,8 +409,8 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-// Admin: list all orders
-router.get("/", requireRole("admin", "personal"), async (_req, res, next) => {
+// List all orders (any authenticated user; public orders board + barista queue)
+router.get("/", async (_req, res, next) => {
   try {
     const pool = getPool();
     const [orders] = await pool.query(

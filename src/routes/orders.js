@@ -425,6 +425,124 @@ router.get("/", async (_req, res, next) => {
   }
 });
 
+// Staff: remove a line item and recalculate order total
+router.delete(
+  "/:orderId/items/:itemId",
+  requireRole("admin", "personal"),
+  async (req, res, next) => {
+    try {
+      const orderId = Number(req.params.orderId);
+      const itemId = Number(req.params.itemId);
+      if (!Number.isFinite(orderId) || !Number.isFinite(itemId)) {
+        return res.status(400).json({ error: "Invalid order or item id" });
+      }
+
+      const pool = getPool();
+      const [orders] = await pool.query(
+        "SELECT id, user_id, status, total FROM orders WHERE id = ?",
+        [orderId],
+      );
+      if (!orders.length) return res.status(404).json({ error: "Order not found" });
+      const order = orders[0];
+
+      if (order.status !== "pending") {
+        return res
+          .status(400)
+          .json({ error: "Items can only be removed while order is pending" });
+      }
+
+      const [items] = await pool.query(
+        "SELECT id FROM order_items WHERE id = ? AND order_id = ?",
+        [itemId, orderId],
+      );
+      if (!items.length) {
+        return res.status(404).json({ error: "Item not found" });
+      }
+
+      await pool.query("DELETE FROM order_items WHERE id = ?", [itemId]);
+
+      const [remaining] = await pool.query(
+        "SELECT quantity, price FROM order_items WHERE order_id = ?",
+        [orderId],
+      );
+
+      let total = 0;
+      for (const row of remaining) {
+        total += Number(row.price || 0) * Number(row.quantity || 1);
+      }
+
+      const newStatus = remaining.length === 0 ? "cancelled" : order.status;
+      await pool.query("UPDATE orders SET total = ?, status = ? WHERE id = ?", [
+        total,
+        newStatus,
+        orderId,
+      ]);
+
+      const io = req.app.get("io");
+      const payload = {
+        id: orderId,
+        userId: Number(order.user_id),
+        total,
+        status: newStatus,
+        removedItemId: itemId,
+      };
+      io?.to("staff").emit("order:updated", payload);
+      io?.to(`user:${order.user_id}`).emit("order:updated", payload);
+
+      return res.json({
+        success: true,
+        total,
+        status: newStatus,
+        removed_item_id: itemId,
+      });
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
+
+// Staff: delete entire order (pending only)
+router.delete(
+  "/:id",
+  requireRole("admin", "personal"),
+  async (req, res, next) => {
+    try {
+      const orderId = Number(req.params.id);
+      if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ error: "Invalid order id" });
+      }
+
+      const pool = getPool();
+      const [orders] = await pool.query(
+        "SELECT id, user_id, status FROM orders WHERE id = ?",
+        [orderId],
+      );
+      if (!orders.length) return res.status(404).json({ error: "Order not found" });
+      const order = orders[0];
+
+      if (order.status !== "pending") {
+        return res
+          .status(400)
+          .json({ error: "Only pending orders can be deleted" });
+      }
+
+      await pool.query("DELETE FROM orders WHERE id = ?", [orderId]);
+
+      const io = req.app.get("io");
+      const payload = {
+        id: orderId,
+        userId: Number(order.user_id),
+      };
+      io?.to("staff").emit("order:deleted", payload);
+      io?.to(`user:${order.user_id}`).emit("order:deleted", payload);
+
+      return res.status(204).send();
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
+
 // Admin: update status
 router.put(
   "/:id/status",

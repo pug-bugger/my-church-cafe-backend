@@ -51,15 +51,31 @@ async function attachDrinkOptions(pool, productRows) {
 // Public: list products with category and drink options
 router.get("/", async (req, res, next) => {
   try {
-    const { category_id } = req.query;
+    const { category_id, parent_category_id } = req.query;
     const pool = getPool();
+    const conditions = [];
+    const params = [];
+    if (category_id) {
+      conditions.push("p.category_id = ?");
+      params.push(category_id);
+    }
+    if (parent_category_id) {
+      conditions.push("(c.parent_id = ? OR p.category_id = ?)");
+      params.push(parent_category_id, parent_category_id);
+    }
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
     const [rows] = await pool.query(
       `SELECT p.id, p.name, p.description, p.base_price, p.image_url, p.available,
-              c.id as category_id, c.name as category_name
-       FROM products p LEFT JOIN categories c ON p.category_id = c.id
-       ${category_id ? "WHERE p.category_id = ?" : ""}
+              c.id as category_id, c.name as category_name, c.parent_id as category_parent_id,
+              pc.id as parent_category_id, pc.name as parent_category_name
+       FROM products p
+       LEFT JOIN categories c ON p.category_id = c.id
+       LEFT JOIN categories pc ON c.parent_id = pc.id
+       ${whereClause}
        ORDER BY p.name ASC`,
-      category_id ? [category_id] : [],
+      params,
     );
     const withOptions = await attachDrinkOptions(pool, rows);
     return res.json(withOptions);

@@ -1,6 +1,6 @@
 -- Create Database
-CREATE DATABASE IF NOT EXISTS church_cafe CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE church_cafe;
+CREATE DATABASE IF NOT EXISTS church_cafe_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE church_cafe_db;
 
 -- Roles Table
 CREATE TABLE IF NOT EXISTS roles (

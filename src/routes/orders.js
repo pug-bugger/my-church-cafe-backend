@@ -126,7 +126,7 @@ const attachOrderItems = async (pool, orders) => {
   if (!orders.length) return orders;
   const orderIds = orders.map((order) => order.id);
   const [items] = await pool.query(
-    `SELECT oi.id, oi.order_id, oi.product_id, oi.quantity, oi.price,
+    `SELECT oi.id, oi.order_id, oi.product_id, oi.quantity, oi.price, oi.comment,
                   p.name AS product_item_name
            FROM order_items oi
            LEFT JOIN products p ON oi.product_id = p.id
@@ -157,6 +157,9 @@ router.post("/", async (req, res, next) => {
         .json({ error: "order without items is not allowed" });
     }
 
+    const orderComment = typeof orderPayload.comment === "string" ? orderPayload.comment.trim() : null;
+    const customerName = typeof orderPayload.customer_name === "string" ? orderPayload.customer_name.trim() || null : null;
+
     const created = await withTransaction(async (conn) => {
       const productColumn = await getOrderItemProductColumn(conn);
 
@@ -175,10 +178,12 @@ router.post("/", async (req, res, next) => {
           !Array.isArray(rawOpts)
             ? rawOpts
             : {};
+        const comment = typeof item.comment === "string" ? item.comment.trim() : null;
         return {
           quantity,
           productId,
           selectedOptions,
+          comment: comment || null,
         };
       });
 
@@ -213,8 +218,8 @@ router.post("/", async (req, res, next) => {
         console.log("total", total);
 
         const [orderRes] = await conn.query(
-          "INSERT INTO orders (user_id, total, status) VALUES (?, ?, ?)",
-          [req.user.id, total, "pending"],
+          "INSERT INTO orders (user_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?)",
+          [req.user.id, total, "pending", orderComment, customerName],
         );
         console.log("orderRes inserted");
 
@@ -225,10 +230,11 @@ router.post("/", async (req, res, next) => {
           it.productId,
           it.quantity,
           basePriceById.get(it.productId),
+          it.comment,
         ]);
         console.log("orderItemValues", orderItemValues);
         await conn.query(
-          "INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ?",
+          "INSERT INTO order_items (order_id, product_id, quantity, price, comment) VALUES ?",
           [orderItemValues],
         );
 
@@ -301,8 +307,8 @@ router.post("/", async (req, res, next) => {
       }
 
       const [orderRes] = await conn.query(
-        "INSERT INTO orders (user_id, total, status) VALUES (?, ?, ?)",
-        [req.user.id, total, "pending"],
+        "INSERT INTO orders (user_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?)",
+        [req.user.id, total, "pending", orderComment, customerName],
       );
       const newOrderId = orderRes.insertId;
 
@@ -313,10 +319,11 @@ router.post("/", async (req, res, next) => {
           primaryId,
           it.quantity,
           basePriceById.get(primaryId),
+          it.comment,
         ];
       });
       await conn.query(
-        "INSERT INTO order_items (order_id, product_item_id, quantity, price) VALUES ?",
+        "INSERT INTO order_items (order_id, product_item_id, quantity, price, comment) VALUES ?",
         [orderItemValues],
       );
 
@@ -391,13 +398,13 @@ router.get("/:id", async (req, res, next) => {
     const [items] =
       productColumn === "product_id"
         ? await pool.query(
-            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, p.name AS product_item_name
+            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, oi.comment, p.name AS product_item_name
              FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id
              WHERE oi.order_id = ?`,
             [order.id],
           )
         : await pool.query(
-            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, pi.name AS product_item_name
+            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, oi.comment, pi.name AS product_item_name
              FROM order_items oi LEFT JOIN product_items pi ON oi.product_item_id = pi.id
              WHERE oi.order_id = ?`,
             [order.id],

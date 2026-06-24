@@ -53,6 +53,12 @@ router.get("/", async (req, res, next) => {
   try {
     const { category_id, parent_category_id } = req.query;
     const pool = getPool();
+
+    // Auto-restore products whose temporary hide has expired
+    await pool.query(
+      "UPDATE products SET available = 1, available_until = NULL WHERE available = 0 AND available_until IS NOT NULL AND available_until <= NOW()",
+    );
+
     const conditions = [];
     const params = [];
     if (category_id) {
@@ -67,7 +73,7 @@ router.get("/", async (req, res, next) => {
       ? `WHERE ${conditions.join(" AND ")}`
       : "";
     const [rows] = await pool.query(
-      `SELECT p.id, p.name, p.description, p.base_price, p.image_url, p.available,
+      `SELECT p.id, p.name, p.description, p.base_price, p.image_url, p.available, p.available_until,
               c.id as category_id, c.name as category_name, c.parent_id as category_parent_id,
               pc.id as parent_category_id, pc.name as parent_category_name
        FROM products p
@@ -190,6 +196,36 @@ async function syncProductDrinkOptions(conn, productId, definitionIds) {
     [rows],
   );
 }
+
+// Admin: set product availability (show / hide forever / hide until midnight tonight)
+router.patch(
+  "/:id/availability",
+  requireRole("admin"),
+  async (req, res, next) => {
+    try {
+      const { available, hide_until_midnight } = req.body;
+      if (typeof available !== "boolean" && available !== 0 && available !== 1) {
+        return res.status(400).json({ error: "available must be a boolean" });
+      }
+      let dbAvailableUntil = null;
+      if (!available && hide_until_midnight) {
+        // Compute server-local midnight as MySQL DATETIME (YYYY-MM-DD HH:MM:SS)
+        const midnight = new Date();
+        midnight.setHours(24, 0, 0, 0);
+        const pad = (n) => String(n).padStart(2, "0");
+        dbAvailableUntil = `${midnight.getFullYear()}-${pad(midnight.getMonth() + 1)}-${pad(midnight.getDate())} ${pad(midnight.getHours())}:${pad(midnight.getMinutes())}:${pad(midnight.getSeconds())}`;
+      }
+      const pool = getPool();
+      await pool.query(
+        "UPDATE products SET available = ?, available_until = ? WHERE id = ?",
+        [available ? 1 : 0, dbAvailableUntil, req.params.id],
+      );
+      return res.json({ success: true });
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
 
 // Admin: create product
 router.post("/", requireRole("admin"), async (req, res, next) => {

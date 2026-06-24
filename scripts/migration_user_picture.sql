@@ -1,5 +1,5 @@
 -- Add profile picture URL for users (run once on existing DBs)
-USE church_cafe;
+USE church_cafe_db;
 
 ALTER TABLE users
   ADD COLUMN picture_url VARCHAR(512) NULL

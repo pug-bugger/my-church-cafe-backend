@@ -127,9 +127,12 @@ const attachOrderItems = async (pool, orders) => {
   const orderIds = orders.map((order) => order.id);
   const [items] = await pool.query(
     `SELECT oi.id, oi.order_id, oi.product_id, oi.quantity, oi.price, oi.comment,
-                  p.name AS product_item_name
+                  p.name AS product_item_name,
+                  COALESCE(parent_cat.name, cat.name) AS category_name
            FROM order_items oi
            LEFT JOIN products p ON oi.product_id = p.id
+           LEFT JOIN categories cat ON p.category_id = cat.id
+           LEFT JOIN categories parent_cat ON cat.parent_id = parent_cat.id
            WHERE oi.order_id IN (?)`,
     [orderIds],
   );
@@ -398,13 +401,17 @@ router.get("/:id", async (req, res, next) => {
     const [items] =
       productColumn === "product_id"
         ? await pool.query(
-            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, oi.comment, p.name AS product_item_name
+            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, oi.comment, p.name AS product_item_name,
+                    COALESCE(parent_cat.name, cat.name) AS category_name
              FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id
+             LEFT JOIN categories cat ON p.category_id = cat.id
+             LEFT JOIN categories parent_cat ON cat.parent_id = parent_cat.id
              WHERE oi.order_id = ?`,
             [order.id],
           )
         : await pool.query(
-            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, oi.comment, pi.name AS product_item_name
+            `SELECT oi.id, oi.order_id, oi.quantity, oi.price, oi.comment, pi.name AS product_item_name,
+                    NULL AS category_name
              FROM order_items oi LEFT JOIN product_items pi ON oi.product_item_id = pi.id
              WHERE oi.order_id = ?`,
             [order.id],

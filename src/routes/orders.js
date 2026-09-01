@@ -1,8 +1,49 @@
 const express = require("express");
 const { getPool, withTransaction } = require("../config/db");
 const { authMiddleware, requireRole } = require("../middleware/auth");
+const { buildKitchenTicket } = require("../lib/escpos");
+const { asyncHandler } = require("../utils/asyncHandler");
+const { emitOrderEvent } = require("../utils/orderEvents");
 
 const router = express.Router();
+
+// Public "active orders" board for an organization — no login required.
+// Returns orders that are still in flight (not yet completed or cancelled).
+router.get("/public", async (req, res, next) => {
+  try {
+    const organizationName =
+      typeof req.query.organization === "string"
+        ? req.query.organization.trim()
+        : "";
+    if (!organizationName) {
+      return res
+        .status(400)
+        .json({ error: "organization query parameter is required" });
+    }
+
+    const pool = getPool();
+    const [orgRows] = await pool.query(
+      "SELECT id FROM organizations WHERE name = ? LIMIT 1",
+      [organizationName],
+    );
+    if (!orgRows.length) {
+      return res.status(404).json({ error: "Organization not found" });
+    }
+
+    const [orders] = await pool.query(
+      `SELECT o.*, ${orderNumberSubquery}
+       FROM orders o
+       WHERE o.organization_id = ?
+         AND o.status IN ('pending', 'preparing', 'ready')
+       ORDER BY o.created_at DESC`,
+      [orgRows[0].id],
+    );
+    const withItems = await attachOrderItems(pool, orders);
+    return res.json(withItems);
+  } catch (err) {
+    return next(err);
+  }
+});
 
 router.use(authMiddleware);
 
@@ -51,6 +92,44 @@ async function enrichItemsWithOptions(pool, items) {
   }
   for (const item of items) {
     item.product_item_options = byItem.get(item.id) || [];
+  }
+}
+
+/**
+ * Attach checkbox_options[] — every checkbox the item's product offers — so the
+ * kitchen ticket can print a Yes/No line for each. An unticked box is never
+ * written to order_item_options (see insertOrderItemOptions), so the stored
+ * options alone can't tell "No" apart from "not offered on this drink".
+ * Print-path only; the barista UI keeps showing just the selected options.
+ */
+async function attachCheckboxDefinitions(pool, items) {
+  if (!items?.length) return;
+  const productIds = [
+    ...new Set(items.map((item) => item.product_id).filter(Boolean)),
+  ];
+  if (!productIds.length) return;
+  let rows = [];
+  try {
+    const [found] = await pool.query(
+      `SELECT pdo.product_id, d.name
+         FROM product_drink_options pdo
+         JOIN drink_option_definitions d ON d.id = pdo.option_definition_id
+        WHERE pdo.product_id IN (?) AND d.type = 'checkbox'
+        ORDER BY pdo.sort_order ASC, d.sort_order ASC, d.id ASC`,
+      [productIds],
+    );
+    rows = found;
+  } catch (err) {
+    if (err && err.code === "ER_NO_SUCH_TABLE") return;
+    throw err;
+  }
+  const byProduct = new Map();
+  for (const row of rows) {
+    if (!byProduct.has(row.product_id)) byProduct.set(row.product_id, []);
+    byProduct.get(row.product_id).push({ name: row.name });
+  }
+  for (const item of items) {
+    item.checkbox_options = byProduct.get(item.product_id) || [];
   }
 }
 
@@ -190,8 +269,6 @@ router.post("/", async (req, res, next) => {
         };
       });
 
-      console.log("productColumn", productColumn);
-
       if (productColumn === "product_id") {
         const productIds = normalizedItems
           .map((it) => it.productId)
@@ -203,7 +280,6 @@ router.post("/", async (req, res, next) => {
           "SELECT id, base_price FROM products WHERE id IN (?)",
           [productIds],
         );
-        console.log("productRows", productRows);
 
         const basePriceById = new Map(
           productRows.map((row) => [row.id, Number(row.base_price || 0)]),
@@ -218,13 +294,10 @@ router.post("/", async (req, res, next) => {
           total += basePrice * it.quantity;
         }
 
-        console.log("total", total);
-
         const [orderRes] = await conn.query(
-          "INSERT INTO orders (user_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?)",
-          [req.user.id, total, "pending", orderComment, customerName],
+          "INSERT INTO orders (user_id, organization_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?, ?)",
+          [req.user.id, req.user.organization_id ?? null, total, "pending", orderComment, customerName],
         );
-        console.log("orderRes inserted");
 
         const newOrderId = orderRes.insertId;
 
@@ -235,7 +308,6 @@ router.post("/", async (req, res, next) => {
           basePriceById.get(it.productId),
           it.comment,
         ]);
-        console.log("orderItemValues", orderItemValues);
         await conn.query(
           "INSERT INTO order_items (order_id, product_id, quantity, price, comment) VALUES ?",
           [orderItemValues],
@@ -277,11 +349,6 @@ router.post("/", async (req, res, next) => {
       });
 
       if (finalItemIds.some((id) => !Number.isFinite(Number(id)))) {
-        finalItemIds.forEach((id) => {
-          console.log("invalid id", id);
-          console.log(!Number.isFinite(Number(id)));
-        });
-
         throw Object.assign(new Error("Invalid product_id"), {
           status: 400,
         });
@@ -310,8 +377,8 @@ router.post("/", async (req, res, next) => {
       }
 
       const [orderRes] = await conn.query(
-        "INSERT INTO orders (user_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?)",
-        [req.user.id, total, "pending", orderComment, customerName],
+        "INSERT INTO orders (user_id, organization_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?, ?)",
+        [req.user.id, req.user.organization_id ?? null, total, "pending", orderComment, customerName],
       );
       const newOrderId = orderRes.insertId;
 
@@ -337,18 +404,33 @@ router.post("/", async (req, res, next) => {
 
     // Realtime event
     const io = req.app.get("io");
-    io?.to("staff").emit("order:created", {
+    emitOrderEvent(io, req.user.id, "order:created", {
       id: created.id,
       userId: req.user.id,
       total: created.total,
       status: "pending",
     });
-    io?.to(`user:${req.user.id}`).emit("order:created", {
-      id: created.id,
-      userId: req.user.id,
-      total: created.total,
-      status: "pending",
-    });
+
+    // Best-effort kitchen ticket print — must never fail order creation.
+    try {
+      const pool = getPool();
+      const [orderRows] = await pool.query("SELECT * FROM orders WHERE id = ?", [
+        created.id,
+      ]);
+      const [orderWithItems] = await attachOrderItems(pool, orderRows);
+      if (orderWithItems) {
+        await attachCheckboxDefinitions(pool, orderWithItems.items);
+        const printerClient = req.app.get("printerClient");
+        const ticket = buildKitchenTicket(orderWithItems, orderWithItems.items);
+        const sent = await printerClient?.print(ticket);
+        if (!sent) {
+          io?.to("staff").emit("printer:unavailable", { orderId: created.id });
+        }
+      }
+    } catch (printErr) {
+      console.error("Kitchen ticket print failed:", printErr);
+      io?.to("staff").emit("printer:unavailable", { orderId: created.id });
+    }
 
     return res.status(201).json({ id: created.id });
   } catch (err) {
@@ -493,15 +575,13 @@ router.delete(
       ]);
 
       const io = req.app.get("io");
-      const payload = {
+      emitOrderEvent(io, order.user_id, "order:updated", {
         id: orderId,
         userId: Number(order.user_id),
         total,
         status: newStatus,
         removedItemId: itemId,
-      };
-      io?.to("staff").emit("order:updated", payload);
-      io?.to(`user:${order.user_id}`).emit("order:updated", payload);
+      });
 
       return res.json({
         success: true,
@@ -543,12 +623,10 @@ router.delete(
       await pool.query("DELETE FROM orders WHERE id = ?", [orderId]);
 
       const io = req.app.get("io");
-      const payload = {
+      emitOrderEvent(io, order.user_id, "order:deleted", {
         id: orderId,
         userId: Number(order.user_id),
-      };
-      io?.to("staff").emit("order:deleted", payload);
-      io?.to(`user:${order.user_id}`).emit("order:deleted", payload);
+      });
 
       return res.status(204).send();
     } catch (err) {
@@ -588,12 +666,7 @@ router.put(
 
       // Realtime event
       const io = req.app.get("io");
-      io?.to("staff").emit("order:statusUpdated", {
-        id: Number(order.id),
-        userId: Number(order.user_id),
-        status,
-      });
-      io?.to(`user:${order.user_id}`).emit("order:statusUpdated", {
+      emitOrderEvent(io, order.user_id, "order:statusUpdated", {
         id: Number(order.id),
         userId: Number(order.user_id),
         status,

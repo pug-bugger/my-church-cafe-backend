@@ -56,4 +56,10 @@ module.exports = {
     jwtSecret: required("JWT_SECRET", "change_this_secret"),
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
   },
+  printer: {
+    // Network receipt printer reached via raw TCP/IP printing (port 9100).
+    // host unset = printing disabled (status shows "not configured").
+    host: process.env.PRINTER_HOST || null,
+    port: Number(process.env.PRINTER_PORT || 9100),
+  },
 };

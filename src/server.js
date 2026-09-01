@@ -6,12 +6,14 @@ const http = require("http");
 const { Server } = require("socket.io");
 const { verifyJwt } = require("./utils/jwt");
 const { port, nodeEnv, corsOrigin, uploadMaxImageMB } = require("./config/env");
+const printerClient = require("./lib/printerClient");
 const authRoutes = require("./routes/auth");
 const userRoutes = require("./routes/users");
 const categoryRoutes = require("./routes/categories");
 const productRoutes = require("./routes/products");
 const drinkOptionRoutes = require("./routes/drinkOptions");
 const orderRoutes = require("./routes/orders");
+const deviceStatusRoutes = require("./routes/deviceStatus");
 
 const app = express();
 const server = http.createServer(app);
@@ -21,6 +23,11 @@ const io = new Server(server, {
 
 // Make io available inside route handlers (req.app.get("io"))
 app.set("io", io);
+
+// Network receipt printer over raw TCP/IP (port 9100). Reachable via
+// req.app.get("printerClient"); polls the printer for reachability.
+printerClient.init();
+app.set("printerClient", printerClient);
 
 // Socket auth via JWT: send `auth: { token }` or `Authorization: Bearer <token>`
 io.use((socket, next) => {
@@ -48,7 +55,6 @@ io.use((socket, next) => {
 });
 
 io.on("connection", (socket) => {
-  // console.log("socket.connection", socket);
   const user = socket.data.user;
   // Per-user room
   if (user?.id) socket.join(`user:${user.id}`);
@@ -89,10 +95,10 @@ app.use("/api/categories", categoryRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/drink-options", drinkOptionRoutes);
 app.use("/api/orders", orderRoutes);
+app.use("/api/device", deviceStatusRoutes);
 
 // 404 handler.
-app.use((req, res, next) => {
-  console.log("404", req?.url);
+app.use((_req, res) => {
   res.status(404).json({ error: "Not Found" });
 });
 

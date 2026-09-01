@@ -9,6 +9,7 @@ const {
   fetchDrinkOptionsForProducts,
   normalizeDrinkOptionsList,
 } = require("../utils/drinkOptionsForProducts");
+const { emitProductEvent } = require("../utils/productEvents");
 
 const router = express.Router();
 
@@ -220,6 +221,9 @@ router.patch(
         "UPDATE products SET available = ?, available_until = ? WHERE id = ?",
         [available ? 1 : 0, dbAvailableUntil, req.params.id],
       );
+      emitProductEvent(req.app.get("io"), "product:updated", {
+        id: Number(req.params.id),
+      });
       return res.json({ success: true });
     } catch (err) {
       return next(err);
@@ -270,6 +274,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
       await syncProductDrinkOptions(conn, productId, drink_option_definition_ids);
       return productId;
     });
+    emitProductEvent(req.app.get("io"), "product:created", { id: result });
     return res.status(201).json({ id: result });
   } catch (err) {
     return next(err);
@@ -325,6 +330,9 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
         await syncProductDrinkOptions(conn, productId, drink_option_definition_ids);
       }
     });
+    emitProductEvent(req.app.get("io"), "product:updated", {
+      id: Number(req.params.id),
+    });
     return res.json({ success: true });
   } catch (err) {
     return next(err);
@@ -336,6 +344,9 @@ router.delete("/:id", requireRole("admin"), async (req, res, next) => {
   try {
     const pool = getPool();
     await pool.query("DELETE FROM products WHERE id = ?", [req.params.id]);
+    emitProductEvent(req.app.get("io"), "product:deleted", {
+      id: Number(req.params.id),
+    });
     return res.status(204).send();
   } catch (err) {
     return next(err);

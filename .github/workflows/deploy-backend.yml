@@ -1,52 +1,91 @@
-name: Deploy Backend
+name: Deploy backend to production
 
 on:
   push:
-    branches:
-      - staging
-      - prod
-      - master
+    branches: [prod]
+  workflow_dispatch:
+
+# Never let two deploys race for the release symlink. Queue instead of cancel,
+# so an in-flight deploy is always allowed to finish or roll itself back.
+concurrency:
+  group: church-cafe-backend-deploy
+  cancel-in-progress: false
 
 jobs:
-  deploy_qa:
-    if: github.ref == 'refs/heads/prod'
+  deploy:
+    name: Build and release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - name: Connect with VPS
-        uses: appleboy/ssh-action@master
+      - uses: actions/setup-node@v4
         with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}
-          script: |
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
-            
-            mkdir -p apps/backend && cd apps/backend
-            
-            if [ -d ".git" ]; then
-              git stash
-              git pull origin prod
-            else
-              git clone -b prod https://github.com/pug-bugger/my-church-cafe-backend.git .
-            fi
-            
-            npm install --force
-            npm run build
+          node-version: 22
+          cache: npm
 
-            pid=$(pm2 pid "church-cafe-back-app" 2>/dev/null)
-            if [ -n "$pid" ]; then
-              echo "Reloading application"
-              pm2 reload "church-cafe-back-app"
-              pm2 save
-            else
-              echo "New application"
-              pm2 start npm --name "church-cafe-back-app" -- start
-              pm2 startup
-              pm2 save
-            fi
+      # The server never runs npm, so production dependencies are installed
+      # here and shipped inside the tarball. Every dependency is pure
+      # JavaScript (bcryptjs, mysql2, socket.io - no native addons), so a
+      # node_modules built on ubuntu-latest runs unchanged on the VPS.
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      # There is no build step and no test suite, so this is the gate: a syntax
+      # error would otherwise only surface as a crash loop after the symlink
+      # had already flipped.
+      - name: Syntax-check sources
+        run: find src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Assemble release bundle
+        run: |
+          # uploads/ is deliberately excluded: release.sh replaces it with a
+          # symlink to shared/uploads, and the two tracked sample avatars in
+          # the repo would otherwise sit in the way of that link.
+          tar -czf release.tar.gz \
+            src package.json package-lock.json node_modules deploy scripts
+          ls -lh release.tar.gz
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          # Pinning the host key means a hijacked DNS record can't harvest the
+          # deploy key. Never replace this with StrictHostKeyChecking=no.
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      # Both church-cafe apps deploy to the same box, so each stages into its
+      # own /tmp directory rather than dropping release.tar.gz at /tmp/ where
+      # the other repo's deploy could overwrite it mid-flight.
+      - name: Upload release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+        run: |
+          ssh -p "$DEPLOY_PORT" -i ~/.ssh/id_deploy \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'mkdir -p /tmp/church-cafe-backend'
+          scp -P "$DEPLOY_PORT" -i ~/.ssh/id_deploy \
+            release.tar.gz deploy/release.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/church-cafe-backend/"
+
+      - name: Activate release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+          SHA: ${{ github.sha }}
+        run: |
+          ssh -p "$DEPLOY_PORT" -i ~/.ssh/id_deploy \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "chmod +x /tmp/church-cafe-backend/release.sh && /tmp/church-cafe-backend/release.sh /tmp/church-cafe-backend/release.tar.gz '$SHA'"
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_deploy

@@ -102,6 +102,19 @@ app.use((_req, res) => {
   res.status(404).json({ error: "Not Found" });
 });
 
+/**
+ * A write that failed for reasons the caller can do nothing about. Almost
+ * always `shared/uploads/` not being writable by the user PM2 runs as, which
+ * otherwise surfaces to whoever changed their photo as a raw `EACCES` naming a
+ * server path.
+ */
+const UPLOAD_WRITE_ERRORS = {
+  EACCES: "The server could not save the file: its upload folder is not writable.",
+  EPERM: "The server could not save the file: its upload folder is not writable.",
+  EROFS: "The server could not save the file: its upload folder is read-only.",
+  ENOSPC: "The server could not save the file: it has run out of disk space.",
+};
+
 // Error handler
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
@@ -114,8 +127,24 @@ app.use((err, req, res, next) => {
     }
     return res.status(400).json({ error: err.message || "Upload error" });
   }
+
+  const uploadWriteError = err && UPLOAD_WRITE_ERRORS[err.code];
+  if (uploadWriteError) {
+    // The syscall, path and stack are in the log line above; staff get the one
+    // sentence that tells them what to go and fix.
+    return res.status(500).json({ error: uploadWriteError });
+  }
+
+  // A status on the error means a route raised it deliberately and its message
+  // was written for the caller. Anything else is unexpected, and those messages
+  // carry internals — filesystem paths, SQL — that should not cross the wire in
+  // production. Outside production keep them: they are how you debug.
   const status = err.status || 500;
-  res.status(status).json({ error: err.message || "Internal Server Error" });
+  const message =
+    status < 500 || nodeEnv !== "production"
+      ? err.message || "Internal Server Error"
+      : "Internal Server Error";
+  res.status(status).json({ error: message });
 });
 
 server.listen(port, () => {

@@ -42,6 +42,21 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
   exit 1
 }
 
+# multer writes avatars and product images into these at runtime, as the user
+# PM2 runs as - the same user running this script. Create them here so a fresh
+# box gets them with the right owner, and refuse to deploy if they are not
+# writable: otherwise the first person to change a photo gets an EACCES, long
+# after anyone is watching the deploy log.
+for sub in products users; do
+  mkdir -p "$SHARED_DIR/uploads/$sub" 2>/dev/null || true
+  [ -w "$SHARED_DIR/uploads/$sub" ] || {
+    echo "$SHARED_DIR/uploads/$sub is not writable by $(id -un) - image uploads would fail at runtime." >&2
+    echo "Fix it on the server, then redeploy:" >&2
+    echo "  sudo chown -R $(id -un) $SHARED_DIR/uploads" >&2
+    exit 1
+  }
+done
+
 # Remember where we can roll back to before touching anything.
 PREVIOUS_DIR=""
 if [ -L "$APP_DIR/current" ]; then

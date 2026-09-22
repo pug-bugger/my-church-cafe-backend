@@ -6,6 +6,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const { verifyJwt } = require("./utils/jwt");
 const { port, nodeEnv, corsOrigin, uploadMaxImageMB } = require("./config/env");
+const { appName, appVersion } = require("./config/version");
 const printerClient = require("./lib/printerClient");
 const authRoutes = require("./routes/auth");
 const userRoutes = require("./routes/users");
@@ -14,6 +15,7 @@ const productRoutes = require("./routes/products");
 const drinkOptionRoutes = require("./routes/drinkOptions");
 const orderRoutes = require("./routes/orders");
 const deviceStatusRoutes = require("./routes/deviceStatus");
+const versionRoutes = require("./routes/version");
 
 const app = express();
 const server = http.createServer(app);
@@ -78,14 +80,15 @@ app.use(
 app.use(express.json());
 app.use(morgan(nodeEnv === "production" ? "combined" : "dev"));
 
-// Health check
+// Health check. The deploy's health gate reads this, so the version it
+// reports is how you confirm the release that just went out is the one live.
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", env: nodeEnv });
+  res.json({ status: "ok", env: nodeEnv, version: appVersion });
 });
 
 // Root
 app.get("/", (_req, res) => {
-  res.json({ name: "Church Cafe Backend", version: "1.0.0" });
+  res.json({ name: appName, version: appVersion });
 });
 
 // Routes
@@ -96,6 +99,7 @@ app.use("/api/products", productRoutes);
 app.use("/api/drink-options", drinkOptionRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/device", deviceStatusRoutes);
+app.use("/api/version", versionRoutes);
 
 // 404 handler.
 app.use((_req, res) => {
@@ -148,5 +152,5 @@ app.use((err, req, res, next) => {
 });
 
 server.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
+  console.log(`${appName} v${appVersion} listening on http://localhost:${port}`);
 });

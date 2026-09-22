@@ -25,6 +25,7 @@ Server runs on http://localhost:4000
 - Categories: `GET /api/categories`, `GET /api/categories/:id`, admin: `POST /api/categories`, `PUT /api/categories/:id`, `DELETE /api/categories/:id`
 - Products: `GET /api/products`, `GET /api/products/:id`, admin: `POST /api/products`, `PUT /api/products/:id`, `DELETE /api/products/:id`, `POST /api/products/:id/items`, `PUT /api/products/items/:itemId`, `DELETE /api/products/items/:itemId`, `POST /api/products/:id/options`, `PUT /api/products/options/:optionId`, `DELETE /api/products/options/:optionId`
 - Orders: auth: `POST /api/orders` (items array), `GET /api/orders/me`, `GET /api/orders/:id`; admin/staff: `GET /api/orders`, `PUT /api/orders/:id/status`
+- Version: `GET /api/version` — public; `{ name, version, env }`, the build that is answering. See `VERSIONING.md`.
 
 Auth via Bearer token. Roles: `admin`, `personal`, `parishioner`.
 
@@ -39,6 +40,8 @@ This backend also exposes a Socket.IO server on the **same base URL/port** as th
 
 ## Notes
 
+- The version comes from `package.json` and is served at `/api/version`,
+  `/health` and `/`. `VERSIONING.md` says when to change it.
 - Passwords hashed with bcrypt.
 - Totals calculated on order creation from current `product_items.price`.
 - Deleting a product cascades to items/options via FK.

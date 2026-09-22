@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS products (
     base_price DECIMAL(10,2),
     image_url VARCHAR(255),
     available BOOLEAN DEFAULT TRUE,
+    -- One running sequence over every product; the menu and the terminal read
+    -- it before falling back to the name (see migration_product_sort_order).
+    sort_order INT NOT NULL DEFAULT 0,
     FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
 );
 
@@ -58,6 +61,8 @@ CREATE TABLE IF NOT EXISTS drink_option_definitions (
     option_key VARCHAR(64) NOT NULL UNIQUE,
     type ENUM('checkbox', 'select') NOT NULL DEFAULT 'select',
     checkbox_extra_price DECIMAL(10,2) DEFAULT 0,
+    -- Whether a checkbox option opens ticked (see migration_option_defaults)
+    checkbox_default TINYINT(1) NOT NULL DEFAULT 0,
     sort_order INT DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -68,7 +73,9 @@ CREATE TABLE IF NOT EXISTS drink_option_values (
     option_definition_id INT NOT NULL,
     label VARCHAR(100) NOT NULL,
     extra_price DECIMAL(10,2) DEFAULT 0,
+    -- At most one row per definition carries this; the terminal opens on it
     sort_order INT DEFAULT 0,
+    is_default TINYINT(1) NOT NULL DEFAULT 0,
     FOREIGN KEY (option_definition_id) REFERENCES drink_option_definitions(id) ON DELETE CASCADE
 );
 

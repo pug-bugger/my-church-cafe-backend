@@ -2,8 +2,23 @@
  * Load drink option definitions assigned to products (junction + definitions + values).
  */
 
+const { hasColumn } = require("./columns");
+
 async function fetchDrinkOptionsForProducts(pool, productIds) {
   if (!productIds.length) return new Map();
+  // The default columns arrive with migration_option_defaults; until it is run
+  // every option simply has no default, which is the behaviour that shipped
+  // before it (see utils/columns.js).
+  const withValueDefault = await hasColumn(
+    pool,
+    "drink_option_values",
+    "is_default",
+  );
+  const withCheckboxDefault = await hasColumn(
+    pool,
+    "drink_option_definitions",
+    "checkbox_default",
+  );
   const [rows] = await pool.query(
     `SELECT pdo.product_id,
             d.id AS def_id,
@@ -11,10 +26,12 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
             d.option_key,
             d.type,
             d.checkbox_extra_price,
+            ${withCheckboxDefault ? "d.checkbox_default," : ""}
             pdo.sort_order AS pdo_sort,
             v.id AS value_id,
             v.label AS value_label,
             v.extra_price AS value_extra,
+            ${withValueDefault ? "v.is_default AS value_default," : ""}
             v.sort_order AS value_sort
      FROM product_drink_options pdo
      INNER JOIN drink_option_definitions d ON d.id = pdo.option_definition_id
@@ -38,6 +55,7 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
         option_key: row.option_key,
         type: row.type,
         checkbox_extra_price: Number(row.checkbox_extra_price ?? 0),
+        checkbox_default: Boolean(row.checkbox_default),
         _pdo_sort: row.pdo_sort ?? 0,
         values: [],
       });
@@ -48,6 +66,7 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
         id: row.value_id,
         label: row.value_label,
         extra_price: Number(row.value_extra ?? 0),
+        is_default: Boolean(row.value_default),
         sort_order: row.value_sort,
       });
     }
@@ -71,6 +90,7 @@ function normalizeDrinkOptionsList(rawList) {
     option_key: d.option_key,
     type: d.type,
     checkbox_extra_price: d.checkbox_extra_price,
+    checkbox_default: Boolean(d.checkbox_default),
     values: d.values || [],
   }));
 }

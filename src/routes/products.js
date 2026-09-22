@@ -11,8 +11,18 @@ const {
 } = require("../utils/drinkOptionsForProducts");
 const { emitProductEvent } = require("../utils/productEvents");
 const { ensureUploadDir } = require("../utils/uploadDir");
+const { asyncHandler } = require("../utils/asyncHandler");
+const { hasColumn } = require("../utils/columns");
 
 const router = express.Router();
+
+/**
+ * Whether `products.sort_order` has been migrated in yet.
+ *
+ * Until it is, the catalogue keeps coming back in `name ASC` — the order it
+ * came back in before the hand-picked sequence existed (see utils/columns.js).
+ */
+const hasSortOrder = (conn) => hasColumn(conn, "products", "sort_order");
 
 const uploadDir = path.join(__dirname, "../../uploads/products");
 ensureUploadDir(uploadDir);
@@ -86,15 +96,19 @@ router.get("/", async (req, res, next) => {
     const whereClause = conditions.length
       ? `WHERE ${conditions.join(" AND ")}`
       : "";
+    // The hand-picked sequence leads; the name is the tie-break, so a product
+    // created before its first reorder still lands somewhere sensible.
+    const ordered = await hasSortOrder(pool);
     const [rows] = await pool.query(
       `SELECT p.id, p.name, p.description, p.base_price, p.image_url, p.available, p.available_until,
+              ${ordered ? "p.sort_order," : ""}
               c.id as category_id, c.name as category_name, c.parent_id as category_parent_id,
               pc.id as parent_category_id, pc.name as parent_category_name
        FROM products p
        LEFT JOIN categories c ON p.category_id = c.id
        LEFT JOIN categories pc ON c.parent_id = pc.id
        ${whereClause}
-       ORDER BY p.name ASC`,
+       ORDER BY ${ordered ? "p.sort_order ASC, " : ""}p.name ASC`,
       params,
     );
     const withOptions = await attachDrinkOptions(pool, rows);
@@ -244,6 +258,64 @@ router.patch(
   },
 );
 
+/**
+ * Admin: set the order products are shown in.
+ *
+ * Takes the whole sequence — `{ ids: [7, 3, 12, …] }` — rather than "move this
+ * one up", because the clients already hold the full list and sending it back
+ * is the only version that can't drift: two admins reordering at once end up
+ * with one of the two sequences, never an interleaving of both.
+ *
+ * Ids the body leaves out keep the position they had, behind everything named
+ * here, so a client working from a filtered list can't silently bury the rest
+ * of the catalogue.
+ *
+ * Registered before `PUT /:id` — otherwise "reorder" is read as a product id.
+ */
+router.put(
+  "/reorder",
+  requireRole("admin"),
+  asyncHandler(async (req, res) => {
+    const raw = Array.isArray(req.body?.ids) ? req.body.ids : null;
+    if (!raw || !raw.length) {
+      return res.status(400).json({ error: "ids must be a non-empty array" });
+    }
+    const ids = raw.map((id) => Number(id));
+    if (ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+      return res.status(400).json({ error: "ids must be product ids" });
+    }
+    if (new Set(ids).size !== ids.length) {
+      return res.status(400).json({ error: "ids must not repeat" });
+    }
+
+    const pool = getPool();
+    if (!(await hasSortOrder(pool))) {
+      return res.status(503).json({
+        error:
+          "Product ordering needs scripts/migration_product_sort_order.sql to be run first",
+      });
+    }
+
+    await withTransaction(async (conn) => {
+      // Everything not named keeps its relative order but sits behind the
+      // named run, so the numbers stay a single contiguous sequence.
+      await conn.query(
+        "UPDATE products SET sort_order = sort_order + ? WHERE id NOT IN (?)",
+        [ids.length, ids],
+      );
+      for (let i = 0; i < ids.length; i += 1) {
+        await conn.query("UPDATE products SET sort_order = ? WHERE id = ?", [
+          i + 1,
+          ids[i],
+        ]);
+      }
+    });
+
+    emitProductEvent(req.app.get("io"), "product:updated", { reordered: true });
+    return res.json({ success: true, count: ids.length });
+  }),
+);
+
 // Admin: create product
 router.post("/", requireRole("admin"), async (req, res, next) => {
   try {
@@ -259,8 +331,21 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
     } = req.body;
     if (!name) return res.status(400).json({ error: "name required" });
     const result = await withTransaction(async (conn) => {
+      // A new product goes to the end of the hand-picked order rather than to
+      // position 0, where a default of 0 would otherwise put it — ahead of
+      // everything the cafe deliberately arranged.
+      const ordered = await hasSortOrder(conn);
+      let nextSortOrder = 0;
+      if (ordered) {
+        const [[{ next }]] = await conn.query(
+          "SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM products",
+        );
+        nextSortOrder = next;
+      }
       const [r] = await conn.query(
-        "INSERT INTO products (category_id, name, description, base_price, image_url, available) VALUES (?, ?, ?, ?, ?, ?)",
+        `INSERT INTO products (category_id, name, description, base_price, image_url, available
+                ${ordered ? ", sort_order" : ""})
+         VALUES (?, ?, ?, ?, ?, ?${ordered ? ", ?" : ""})`,
         [
           category_id || null,
           name,
@@ -268,6 +353,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
           base_price || null,
           image_url || null,
           available !== false,
+          ...(ordered ? [nextSortOrder] : []),
         ],
       );
       const productId = r.insertId;

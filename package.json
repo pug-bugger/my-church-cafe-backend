@@ -1,6 +1,6 @@
 {
   "name": "church-cafe-backend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Express backend for Church Cafe using MySQL",
   "main": "src/server.js",
   "type": "commonjs",

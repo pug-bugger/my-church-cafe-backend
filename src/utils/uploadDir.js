@@ -28,10 +28,23 @@ function ensureUploadDir(dir) {
     fs.accessSync(dir, fs.constants.W_OK);
     return true;
   } catch (err) {
+    // Print both sides of the mismatch. The failure this was written for was a
+    // shared/uploads tree copied off a Mac during a server migration: it stayed
+    // owned by uid 501 with mode 775, so the app user fell through to "other"
+    // and could read every avatar but write none. Owner-vs-process makes that
+    // obvious; "not writable" on its own does not.
+    let owner = "unknown";
+    try {
+      const st = fs.statSync(dir);
+      owner = `uid ${st.uid}, gid ${st.gid}, mode ${(st.mode & 0o777).toString(8)}`;
+    } catch (_e) {
+      /* fall through with "unknown" */
+    }
     console.error(
-      `[uploads] ${dir} is NOT writable by uid ${process.getuid?.()} (${err.code}). ` +
-        `Image uploads will fail until this is fixed.\n` +
-        `[uploads] Fix: sudo chown -R <pm2-user> $(readlink -f ${dir})`,
+      `[uploads] ${dir} is NOT writable (${err.code}). Image uploads will fail.\n` +
+        `[uploads]   directory is owned by ${owner}\n` +
+        `[uploads]   this process runs as uid ${process.getuid?.()}, gid ${process.getgid?.()}\n` +
+        `[uploads] Fix: chown -R <that process user> $(readlink -f ${dir})`,
     );
     return false;
   }

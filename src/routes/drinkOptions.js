@@ -129,6 +129,15 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
 router.put("/:id", requireRole("admin"), async (req, res, next) => {
   try {
     const { name, type, checkbox_extra_price, sort_order } = req.body;
+    // Charged to customers, so validate rather than coerce (see PUT /values).
+    if (checkbox_extra_price != null) {
+      const n = Number(checkbox_extra_price);
+      if (!Number.isFinite(n) || n < 0) {
+        return res
+          .status(400)
+          .json({ error: "checkbox_extra_price must be a number of 0 or more" });
+      }
+    }
     const pool = getPool();
     const [defs] = await pool.query(
       "SELECT id FROM drink_option_definitions WHERE id = ?",
@@ -213,7 +222,22 @@ router.post("/:id/values", requireRole("admin"), async (req, res, next) => {
 router.put("/values/:valueId", requireRole("admin"), async (req, res, next) => {
   try {
     const { label, extra_price, sort_order } = req.body;
+    // This sets a price customers are charged, so it validates rather than
+    // silently coercing: NaN or a negative would otherwise become a discount.
+    if (extra_price != null) {
+      const n = Number(extra_price);
+      if (!Number.isFinite(n) || n < 0) {
+        return res
+          .status(400)
+          .json({ error: "extra_price must be a number of 0 or more" });
+      }
+    }
     const pool = getPool();
+    const [existing] = await pool.query(
+      "SELECT id FROM drink_option_values WHERE id = ?",
+      [req.params.valueId],
+    );
+    if (!existing.length) return res.status(404).json({ error: "Not found" });
     await pool.query(
       `UPDATE drink_option_values SET
         label = COALESCE(?, label),
@@ -222,6 +246,8 @@ router.put("/values/:valueId", requireRole("admin"), async (req, res, next) => {
        WHERE id = ?`,
       [
         label || null,
+        // `!= null` rather than `||` so that 0 — "this option is now free" —
+        // actually persists instead of being read as "leave unchanged".
         extra_price != null ? Number(extra_price) : null,
         sort_order ?? null,
         req.params.valueId,

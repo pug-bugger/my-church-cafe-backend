@@ -10,13 +10,12 @@ const {
   normalizeDrinkOptionsList,
 } = require("../utils/drinkOptionsForProducts");
 const { emitProductEvent } = require("../utils/productEvents");
+const { ensureUploadDir } = require("../utils/uploadDir");
 
 const router = express.Router();
 
 const uploadDir = path.join(__dirname, "../../uploads/products");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+ensureUploadDir(uploadDir);
 
 /**
  * Extension to store an upload under, keyed by the MIME type `fileFilter` has

@@ -6,13 +6,12 @@ const bcrypt = require("bcryptjs");
 const { getPool } = require("../config/db");
 const { uploadMaxImageBytes, uploadMaxImageMB } = require("../config/env");
 const { authMiddleware, requireRole } = require("../middleware/auth");
+const { ensureUploadDir } = require("../utils/uploadDir");
 
 const router = express.Router();
 
 const uploadDir = path.join(__dirname, "../../uploads/users");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+ensureUploadDir(uploadDir);
 
 /**
  * Extension to store an upload under, keyed by the MIME type `fileFilter` has

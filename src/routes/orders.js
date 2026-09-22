@@ -63,9 +63,11 @@ async function enrichItemsWithOptions(pool, items) {
   if (!items.length) return;
   const itemIds = items.map((row) => row.id);
   let opts = [];
+  const withPrice = await hasOptionPriceColumn(pool);
   try {
     const [rows] = await pool.query(
       `SELECT id, order_item_id, option_definition_name, option_value_name
+              ${withPrice ? ", extra_price" : ""}
        FROM order_item_options
        WHERE order_item_id IN (?)
        ORDER BY id ASC`,
@@ -88,6 +90,9 @@ async function enrichItemsWithOptions(pool, items) {
       id: o.id,
       option_definition_name: o.option_definition_name,
       option_value_name: o.option_value_name,
+      // What this option added to the line when the order was placed — not what
+      // it would cost today.
+      extra_price: Number(o.extra_price ?? 0),
     });
   }
   for (const item of items) {
@@ -133,71 +138,163 @@ async function attachCheckboxDefinitions(pool, items) {
   }
 }
 
-async function insertOrderItemOptions(conn, orderItemId, selectedOptions) {
-  if (
-    !selectedOptions ||
-    typeof selectedOptions !== "object" ||
-    Array.isArray(selectedOptions)
-  ) {
-    return;
-  }
-  const entries = Object.entries(selectedOptions).filter(
-    ([, v]) => v != null && String(v).length > 0,
-  );
-  if (!entries.length) return;
-  const defIds = entries
-    .map(([k]) => Number.parseInt(String(k), 10))
-    .filter((n) => Number.isFinite(n) && n > 0);
-  if (!defIds.length) return;
-  let defs = [];
+let cachedOptionPriceColumn = null;
+
+/**
+ * Whether `order_item_options.extra_price` exists yet.
+ *
+ * The backend redeploys automatically on a push to `prod` while migrations are
+ * run by hand, so a deploy can land before `migration_order_item_option_price`
+ * does. Without this check that window would 500 on every order. Same runtime
+ * detection the `product_id` rename uses above.
+ */
+const hasOptionPriceColumn = async (conn) => {
+  if (cachedOptionPriceColumn !== null) return cachedOptionPriceColumn;
   try {
-    const [rows] = await conn.query(
-      `SELECT id, name, type FROM drink_option_definitions WHERE id IN (?)`,
-      [defIds],
+    const [cols] = await conn.query(
+      "SHOW COLUMNS FROM order_item_options LIKE 'extra_price'",
     );
-    defs = rows;
+    cachedOptionPriceColumn = cols.length > 0;
   } catch (err) {
-    if (err && err.code === "ER_NO_SUCH_TABLE") return;
-    throw err;
-  }
-  const defById = new Map(defs.map((d) => [d.id, d]));
-  const valueRows = [];
-  for (const [defIdStr, rawVal] of entries) {
-    const defId = Number.parseInt(String(defIdStr), 10);
-    if (!Number.isFinite(defId) || defId <= 0) continue;
-    const def = defById.get(defId);
-    if (!def) continue;
-    const val = String(rawVal);
-    if (def.type === "checkbox") {
-      if (val !== "true") continue;
-      valueRows.push([orderItemId, defId, def.name, "Yes"]);
+    if (err && err.code === "ER_NO_SUCH_TABLE") {
+      cachedOptionPriceColumn = false;
     } else {
-      valueRows.push([orderItemId, defId, def.name, val]);
+      throw err;
     }
   }
-  if (!valueRows.length) return;
-  try {
-    await conn.query(
-      `INSERT INTO order_item_options
-        (order_item_id, drink_option_definition_id, option_definition_name, option_value_name)
-       VALUES ?`,
-      [valueRows],
+  return cachedOptionPriceColumn;
+};
+
+const normalizeLabel = (value) => String(value).trim().toLowerCase();
+
+/**
+ * Resolve every item's selected options into priced rows, reading each price
+ * from the database.
+ *
+ * The client sends only *which* option was picked, never what it costs, so this
+ * is the only place an order's surcharges are decided. Sets two fields on each
+ * normalized item: `optionRows` (ready to INSERT) and `surcharge` (the per-unit
+ * sum to add to the line price).
+ *
+ * A selection that matches no value row prices at 0 and is still recorded — a
+ * stale client must never be able to fail order taking.
+ */
+async function attachOptionPricing(conn, normalizedItems) {
+  for (const item of normalizedItems) {
+    item.optionRows = [];
+    item.surcharge = 0;
+  }
+
+  const entriesByItem = normalizedItems.map((item) => {
+    const selected = item.selectedOptions;
+    if (!selected || typeof selected !== "object" || Array.isArray(selected)) {
+      return [];
+    }
+    return Object.entries(selected).filter(
+      ([, v]) => v != null && String(v).length > 0,
     );
+  });
+
+  const defIds = [
+    ...new Set(
+      entriesByItem
+        .flat()
+        .map(([k]) => Number.parseInt(String(k), 10))
+        .filter((n) => Number.isFinite(n) && n > 0),
+    ),
+  ];
+  if (!defIds.length) return;
+
+  let defs = [];
+  let values = [];
+  try {
+    const [defRows] = await conn.query(
+      `SELECT id, name, type, checkbox_extra_price
+         FROM drink_option_definitions WHERE id IN (?)`,
+      [defIds],
+    );
+    defs = defRows;
+    const [valueRows] = await conn.query(
+      `SELECT option_definition_id, label, extra_price
+         FROM drink_option_values
+        WHERE option_definition_id IN (?)
+        ORDER BY sort_order ASC, id ASC`,
+      [defIds],
+    );
+    values = valueRows;
   } catch (err) {
+    // No options tables on this install: everything stays at 0.
     if (err && err.code === "ER_NO_SUCH_TABLE") return;
     throw err;
   }
+
+  const defById = new Map(defs.map((d) => [d.id, d]));
+  // Selections arrive as labels rather than value ids, so price lookup is by
+  // label. `ORDER BY sort_order, id` above makes a duplicate label deterministic
+  // — first one wins — rather than whichever row the engine happened to return.
+  const priceByDefAndLabel = new Map();
+  for (const v of values) {
+    const key = `${v.option_definition_id}:${normalizeLabel(v.label)}`;
+    if (!priceByDefAndLabel.has(key)) {
+      priceByDefAndLabel.set(key, Number(v.extra_price ?? 0));
+    }
+  }
+
+  normalizedItems.forEach((item, index) => {
+    for (const [defIdStr, rawVal] of entriesByItem[index]) {
+      const defId = Number.parseInt(String(defIdStr), 10);
+      if (!Number.isFinite(defId) || defId <= 0) continue;
+      const def = defById.get(defId);
+      if (!def) continue;
+      const val = String(rawVal);
+
+      if (def.type === "checkbox") {
+        // An unticked box is not recorded at all, so "no row" reads as No.
+        if (val !== "true") continue;
+        const price = Number(def.checkbox_extra_price ?? 0);
+        item.optionRows.push([defId, def.name, "Yes", price]);
+        item.surcharge += price;
+      } else {
+        const price =
+          priceByDefAndLabel.get(`${defId}:${normalizeLabel(val)}`) ?? 0;
+        item.optionRows.push([defId, def.name, val, price]);
+        item.surcharge += price;
+      }
+    }
+  });
 }
 
 async function persistOptionsForNewOrder(conn, newOrderId, normalizedItems) {
+  const withPrice = await hasOptionPriceColumn(conn);
   const [orderItemRows] = await conn.query(
     "SELECT id FROM order_items WHERE order_id = ? ORDER BY id ASC",
     [newOrderId],
   );
+  const rows = [];
   for (let i = 0; i < normalizedItems.length; i += 1) {
     const row = orderItemRows[i];
     if (!row) break;
-    await insertOrderItemOptions(conn, row.id, normalizedItems[i].selectedOptions);
+    for (const [defId, defName, valueName, price] of
+      normalizedItems[i].optionRows ?? []) {
+      rows.push(
+        withPrice
+          ? [row.id, defId, defName, valueName, price]
+          : [row.id, defId, defName, valueName],
+      );
+    }
+  }
+  if (!rows.length) return;
+  const columns = withPrice
+    ? "(order_item_id, drink_option_definition_id, option_definition_name, option_value_name, extra_price)"
+    : "(order_item_id, drink_option_definition_id, option_definition_name, option_value_name)";
+  try {
+    await conn.query(
+      `INSERT INTO order_item_options ${columns} VALUES ?`,
+      [rows],
+    );
+  } catch (err) {
+    if (err && err.code === "ER_NO_SUCH_TABLE") return;
+    throw err;
   }
 }
 
@@ -269,6 +366,10 @@ router.post("/", async (req, res, next) => {
         };
       });
 
+      // Price the options before any money is worked out: the surcharges are
+      // part of the line rate, not something added afterwards.
+      await attachOptionPricing(conn, normalizedItems);
+
       if (productColumn === "product_id") {
         const productIds = normalizedItems
           .map((it) => it.productId)
@@ -284,14 +385,17 @@ router.post("/", async (req, res, next) => {
         const basePriceById = new Map(
           productRows.map((row) => [row.id, Number(row.base_price || 0)]),
         );
-        // Calculate total
+        // Calculate total. `order_items.price` is the *unit* rate including the
+        // surcharges chosen for that line, which is what keeps the recalculation
+        // on item removal (below) and the reports' unit/line columns correct.
         let total = 0;
         for (const it of normalizedItems) {
           const basePrice = basePriceById.get(it.productId);
           if (basePrice === undefined) {
             throw Object.assign(new Error("Invalid product"), { status: 400 });
           }
-          total += basePrice * it.quantity;
+          it.unitPrice = basePrice + (it.surcharge ?? 0);
+          total += it.unitPrice * it.quantity;
         }
 
         const [orderRes] = await conn.query(
@@ -305,7 +409,7 @@ router.post("/", async (req, res, next) => {
           newOrderId,
           it.productId,
           it.quantity,
-          basePriceById.get(it.productId),
+          it.unitPrice,
           it.comment,
         ]);
         await conn.query(
@@ -362,7 +466,7 @@ router.post("/", async (req, res, next) => {
         rows.map((r) => [r.id, Number(r.base_price || 0)]),
       );
 
-      // Calculate total
+      // Calculate total — unit rate including this line's surcharges, as above.
       let total = 0;
       for (let i = 0; i < normalizedItems.length; i += 1) {
         const it = normalizedItems[i];
@@ -373,7 +477,8 @@ router.post("/", async (req, res, next) => {
             status: 400,
           });
         }
-        total += basePrice * it.quantity;
+        it.unitPrice = basePrice + (it.surcharge ?? 0);
+        total += it.unitPrice * it.quantity;
       }
 
       const [orderRes] = await conn.query(
@@ -384,13 +489,7 @@ router.post("/", async (req, res, next) => {
 
       const orderItemValues = normalizedItems.map((it, idx) => {
         const primaryId = finalItemIds[idx];
-        return [
-          newOrderId,
-          primaryId,
-          it.quantity,
-          basePriceById.get(primaryId),
-          it.comment,
-        ];
+        return [newOrderId, primaryId, it.quantity, it.unitPrice, it.comment];
       });
       await conn.query(
         "INSERT INTO order_items (order_id, product_item_id, quantity, price, comment) VALUES ?",

@@ -23,6 +23,7 @@ const router = express.Router();
  * came back in before the hand-picked sequence existed (see utils/columns.js).
  */
 const hasSortOrder = (conn) => hasColumn(conn, "products", "sort_order");
+const hasTranslations = (conn) => hasColumn(conn, "products", "name_lt");
 
 const uploadDir = path.join(__dirname, "../../uploads/products");
 ensureUploadDir(uploadDir);
@@ -99,9 +100,11 @@ router.get("/", async (req, res, next) => {
     // The hand-picked sequence leads; the name is the tie-break, so a product
     // created before its first reorder still lands somewhere sensible.
     const ordered = await hasSortOrder(pool);
+    const translated = await hasTranslations(pool);
     const [rows] = await pool.query(
       `SELECT p.id, p.name, p.description, p.base_price, p.image_url, p.available, p.available_until,
               ${ordered ? "p.sort_order," : ""}
+              ${translated ? "p.name_lt, p.name_ru," : ""}
               c.id as category_id, c.name as category_name, c.parent_id as category_parent_id,
               pc.id as parent_category_id, pc.name as parent_category_name
        FROM products p
@@ -328,6 +331,8 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
       available,
       items,
       drink_option_definition_ids,
+      name_lt,
+      name_ru,
     } = req.body;
     if (!name) return res.status(400).json({ error: "name required" });
     const result = await withTransaction(async (conn) => {
@@ -335,6 +340,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
       // position 0, where a default of 0 would otherwise put it — ahead of
       // everything the cafe deliberately arranged.
       const ordered = await hasSortOrder(conn);
+      const translated = await hasTranslations(conn);
       let nextSortOrder = 0;
       if (ordered) {
         const [[{ next }]] = await conn.query(
@@ -344,8 +350,9 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
       }
       const [r] = await conn.query(
         `INSERT INTO products (category_id, name, description, base_price, image_url, available
-                ${ordered ? ", sort_order" : ""})
-         VALUES (?, ?, ?, ?, ?, ?${ordered ? ", ?" : ""})`,
+                ${ordered ? ", sort_order" : ""}
+                ${translated ? ", name_lt, name_ru" : ""})
+         VALUES (?, ?, ?, ?, ?, ?${ordered ? ", ?" : ""}${translated ? ", ?, ?" : ""})`,
         [
           category_id || null,
           name,
@@ -354,6 +361,7 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
           image_url || null,
           available !== false,
           ...(ordered ? [nextSortOrder] : []),
+          ...(translated ? [name_lt || null, name_ru || null] : []),
         ],
       );
       const productId = r.insertId;
@@ -392,11 +400,17 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
       available,
       items,
       drink_option_definition_ids,
+      name_lt,
+      name_ru,
     } = req.body;
     const productId = req.params.id;
     await withTransaction(async (conn) => {
+      const translated = await hasTranslations(conn);
+      const translationSet = translated
+        ? ", name_lt = ?, name_ru = ?"
+        : "";
       await conn.query(
-        "UPDATE products SET category_id = COALESCE(?, category_id), name = COALESCE(?, name), description = COALESCE(?, description), base_price = COALESCE(?, base_price), image_url = COALESCE(?, image_url), available = COALESCE(?, available) WHERE id = ?",
+        `UPDATE products SET category_id = COALESCE(?, category_id), name = COALESCE(?, name), description = COALESCE(?, description), base_price = COALESCE(?, base_price), image_url = COALESCE(?, image_url), available = COALESCE(?, available)${translationSet} WHERE id = ?`,
         [
           category_id ?? null,
           name || null,
@@ -404,6 +418,7 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
           base_price ?? null,
           image_url || null,
           available,
+          ...(translated ? [name_lt ?? null, name_ru ?? null] : []),
           productId,
         ],
       );

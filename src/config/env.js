@@ -56,6 +56,15 @@ module.exports = {
     jwtSecret: required("JWT_SECRET", "change_this_secret"),
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
   },
+  google: {
+    // OAuth client ids whose ID tokens are accepted (comma-separated: the web
+    // client, plus the iOS/Android ones once the mobile app signs in too).
+    // The first is handed to the web app. Empty = Google sign-in disabled.
+    clientIds: String(process.env.GOOGLE_CLIENT_ID || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  },
   printer: {
     // Network receipt printer reached via raw TCP/IP printing (port 9100).
     // host unset = printing disabled (status shows "not configured").

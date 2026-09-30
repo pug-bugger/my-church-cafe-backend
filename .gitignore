@@ -47,4 +47,8 @@ node_modules/
 .next
 out
 
+# Local copies of the production database (see docs/DATABASE.md) — real
+# customer emails/password hashes/card codes, never commit these
+db-dumps/
+
 

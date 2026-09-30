@@ -4,8 +4,31 @@ const { authMiddleware, requireRole } = require("../middleware/auth");
 const { buildKitchenTicket } = require("../lib/escpos");
 const { asyncHandler } = require("../utils/asyncHandler");
 const { emitOrderEvent } = require("../utils/orderEvents");
+const { customerCardsEnabled, findUserByCard } = require("../lib/customerCard");
+const { notifyUser } = require("../lib/pushClient");
 
 const router = express.Router();
+
+const isStaffRole = (role) => role === "admin" || role === "personal";
+
+/**
+ * Push the customer an order is for, without holding up the response.
+ *
+ * Only the moments a customer has to act on get a push: the order is ready,
+ * or it will not be made (cancelled or deleted). Everything else, including
+ * "order received", reaches an open app through the socket. Nobody is pushed
+ * about a change they made themselves.
+ */
+function notifyCustomer(req, order, key, orderNumber) {
+  const customerId = order.customer_user_id;
+  if (customerId == null || Number(customerId) === Number(req.user.id)) return;
+  void notifyUser(
+    customerId,
+    key,
+    { number: `#${orderNumber ?? order.id}` },
+    { orderId: Number(order.id) },
+  );
+}
 
 // Public "active orders" board for an organization — no login required.
 // Returns orders that are still in flight (not yet completed or cancelled).
@@ -337,7 +360,39 @@ router.post("/", async (req, res, next) => {
     }
 
     const orderComment = typeof orderPayload.comment === "string" ? orderPayload.comment.trim() : null;
-    const customerName = typeof orderPayload.customer_name === "string" ? orderPayload.customer_name.trim() || null : null;
+    const typedCustomerName = typeof orderPayload.customer_name === "string" ? orderPayload.customer_name.trim() || null : null;
+
+    // Who the order is for. Staff attach a customer by scanning their card;
+    // anyone else ordering for themselves is their own customer. Before the
+    // card migration runs there is nowhere to record it, and the order is
+    // taken exactly as it was before.
+    const linkCustomers = await customerCardsEnabled(getPool());
+    let customerUserId = null;
+    let customerName = typedCustomerName;
+    if (linkCustomers) {
+      const card = orderPayload.customer_card;
+      if (isStaffRole(req.user.role) && typeof card === "string" && card.trim()) {
+        const customer = await findUserByCard(getPool(), card);
+        if (!customer) {
+          return res.status(400).json({ error: "Customer card not recognised" });
+        }
+        customerUserId = customer.id;
+        customerName = typedCustomerName ?? customer.name;
+      } else if (!isStaffRole(req.user.role)) {
+        customerUserId = req.user.id;
+      }
+    }
+
+    const insertOrder = (conn, total) =>
+      linkCustomers
+        ? conn.query(
+            "INSERT INTO orders (user_id, customer_user_id, organization_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [req.user.id, customerUserId, req.user.organization_id ?? null, total, "pending", orderComment, customerName],
+          )
+        : conn.query(
+            "INSERT INTO orders (user_id, organization_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?, ?)",
+            [req.user.id, req.user.organization_id ?? null, total, "pending", orderComment, customerName],
+          );
 
     const created = await withTransaction(async (conn) => {
       const productColumn = await getOrderItemProductColumn(conn);
@@ -398,10 +453,7 @@ router.post("/", async (req, res, next) => {
           total += it.unitPrice * it.quantity;
         }
 
-        const [orderRes] = await conn.query(
-          "INSERT INTO orders (user_id, organization_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?, ?)",
-          [req.user.id, req.user.organization_id ?? null, total, "pending", orderComment, customerName],
-        );
+        const [orderRes] = await insertOrder(conn, total);
 
         const newOrderId = orderRes.insertId;
 
@@ -481,10 +533,7 @@ router.post("/", async (req, res, next) => {
         total += it.unitPrice * it.quantity;
       }
 
-      const [orderRes] = await conn.query(
-        "INSERT INTO orders (user_id, organization_id, total, status, comment, customer_name) VALUES (?, ?, ?, ?, ?, ?)",
-        [req.user.id, req.user.organization_id ?? null, total, "pending", orderComment, customerName],
-      );
+      const [orderRes] = await insertOrder(conn, total);
       const newOrderId = orderRes.insertId;
 
       const orderItemValues = normalizedItems.map((it, idx) => {
@@ -503,7 +552,7 @@ router.post("/", async (req, res, next) => {
 
     // Realtime event
     const io = req.app.get("io");
-    emitOrderEvent(io, req.user.id, "order:created", {
+    emitOrderEvent(io, [req.user.id, customerUserId], "order:created", {
       id: created.id,
       userId: req.user.id,
       total: created.total,
@@ -543,6 +592,35 @@ const orderNumberSubquery = `(SELECT COUNT(*) FROM orders o2
     AND (o2.created_at < o.created_at OR (o2.created_at = o.created_at AND o2.id <= o.id))
 ) AS order_number`;
 
+/** The day's running number for one order — what the customer is called by. */
+async function orderNumberFor(pool, orderId) {
+  const [rows] = await pool.query(
+    `SELECT ${orderNumberSubquery} FROM orders o WHERE o.id = ?`,
+    [orderId],
+  );
+  return rows[0]?.order_number ?? null;
+}
+
+// Orders I am the customer of — the list under the card in the mobile app.
+// Not `/me`: for staff that means every order they rang up on the terminal.
+router.get(
+  "/customer",
+  asyncHandler(async (req, res) => {
+    const pool = getPool();
+    // Before the card migration no order has a customer yet.
+    if (!(await customerCardsEnabled(pool))) return res.json([]);
+    const [orders] = await pool.query(
+      `SELECT o.*, ${orderNumberSubquery}
+       FROM orders o
+       WHERE o.customer_user_id = ?
+       ORDER BY o.created_at DESC
+       LIMIT 50`,
+      [req.user.id],
+    );
+    res.json(await attachOrderItems(pool, orders));
+  }),
+);
+
 // Get my orders
 router.get("/me", async (req, res, next) => {
   try {
@@ -573,8 +651,8 @@ router.get("/:id", async (req, res, next) => {
     const order = orders[0];
     if (
       order.user_id !== req.user.id &&
-      req.user.role !== "admin" &&
-      req.user.role !== "personal"
+      order.customer_user_id !== req.user.id &&
+      !isStaffRole(req.user.role)
     ) {
       return res.status(403).json({ error: "Forbidden" });
     }
@@ -633,10 +711,11 @@ router.delete(
       }
 
       const pool = getPool();
-      const [orders] = await pool.query(
-        "SELECT id, user_id, status, total FROM orders WHERE id = ?",
-        [orderId],
-      );
+      // `*` rather than a column list: `customer_user_id` only exists once the
+      // card migration has run.
+      const [orders] = await pool.query("SELECT * FROM orders WHERE id = ?", [
+        orderId,
+      ]);
       if (!orders.length) return res.status(404).json({ error: "Order not found" });
       const order = orders[0];
 
@@ -674,13 +753,18 @@ router.delete(
       ]);
 
       const io = req.app.get("io");
-      emitOrderEvent(io, order.user_id, "order:updated", {
+      emitOrderEvent(io, [order.user_id, order.customer_user_id], "order:updated", {
         id: orderId,
         userId: Number(order.user_id),
         total,
         status: newStatus,
         removedItemId: itemId,
       });
+
+      // Removing the last line cancels the order.
+      if (newStatus === "cancelled") {
+        notifyCustomer(req, order, "orderCancelled", await orderNumberFor(pool, orderId));
+      }
 
       return res.json({
         success: true,
@@ -707,7 +791,7 @@ router.delete(
 
       const pool = getPool();
       const [orders] = await pool.query(
-        "SELECT id, user_id, status FROM orders WHERE id = ?",
+        `SELECT o.*, ${orderNumberSubquery} FROM orders o WHERE o.id = ?`,
         [orderId],
       );
       if (!orders.length) return res.status(404).json({ error: "Order not found" });
@@ -722,10 +806,13 @@ router.delete(
       await pool.query("DELETE FROM orders WHERE id = ?", [orderId]);
 
       const io = req.app.get("io");
-      emitOrderEvent(io, order.user_id, "order:deleted", {
+      emitOrderEvent(io, [order.user_id, order.customer_user_id], "order:deleted", {
         id: orderId,
         userId: Number(order.user_id),
       });
+
+      // The number was read before the row went: a deleted order has none.
+      notifyCustomer(req, order, "orderCancelled", order.order_number);
 
       return res.status(204).send();
     } catch (err) {
@@ -753,7 +840,7 @@ router.put(
         return res.status(400).json({ error: "Invalid status" });
       const pool = getPool();
       const [orders] = await pool.query(
-        "SELECT id, user_id, total, status FROM orders WHERE id = ?",
+        `SELECT o.*, ${orderNumberSubquery} FROM orders o WHERE o.id = ?`,
         [req.params.id],
       );
       if (!orders.length) return res.status(404).json({ error: "Not found" });
@@ -765,11 +852,21 @@ router.put(
 
       // Realtime event
       const io = req.app.get("io");
-      emitOrderEvent(io, order.user_id, "order:statusUpdated", {
+      emitOrderEvent(io, [order.user_id, order.customer_user_id], "order:statusUpdated", {
         id: Number(order.id),
         userId: Number(order.user_id),
         status,
       });
+
+      // Push only on the change itself: re-sending "ready" (a double tap, a
+      // retry) must not buzz the customer's phone twice.
+      if (status !== order.status) {
+        if (status === "ready") {
+          notifyCustomer(req, order, "orderReady", order.order_number);
+        } else if (status === "cancelled") {
+          notifyCustomer(req, order, "orderCancelled", order.order_number);
+        }
+      }
 
       return res.json({ success: true });
     } catch (err) {

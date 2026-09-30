@@ -17,6 +17,8 @@ const orderRoutes = require("./routes/orders");
 const deviceStatusRoutes = require("./routes/deviceStatus");
 const versionRoutes = require("./routes/version");
 const settingsRoutes = require("./routes/settings");
+const cardRoutes = require("./routes/card");
+const pushRoutes = require("./routes/push");
 
 const app = express();
 const server = http.createServer(app);
@@ -102,6 +104,8 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/device", deviceStatusRoutes);
 app.use("/api/version", versionRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/card", cardRoutes);
+app.use("/api/push", pushRoutes);
 
 // 404 handler.
 app.use((_req, res) => {

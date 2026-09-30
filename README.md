@@ -24,7 +24,9 @@ Server runs on http://localhost:4000
 - Users: `GET /api/users/me`, `PUT /api/users/me`, admin: `GET /api/users`, `POST /api/users`, `PUT /api/users/:id`, `DELETE /api/users/:id`
 - Categories: `GET /api/categories`, `GET /api/categories/:id`, admin: `POST /api/categories`, `PUT /api/categories/:id`, `DELETE /api/categories/:id`
 - Products: `GET /api/products`, `GET /api/products/:id`, admin: `POST /api/products`, `PUT /api/products/:id`, `DELETE /api/products/:id`, `POST /api/products/:id/items`, `PUT /api/products/items/:itemId`, `DELETE /api/products/items/:itemId`, `POST /api/products/:id/options`, `PUT /api/products/options/:optionId`, `DELETE /api/products/options/:optionId`
-- Orders: auth: `POST /api/orders` (items array), `GET /api/orders/me`, `GET /api/orders/:id`; admin/staff: `GET /api/orders`, `PUT /api/orders/:id/status`
+- Orders: auth: `POST /api/orders` (items array; staff may add `customer_card` from a scanned card), `GET /api/orders/me`, `GET /api/orders/customer` (orders you are the customer of), `GET /api/orders/:id`; admin/staff: `GET /api/orders`, `PUT /api/orders/:id/status`
+- Customer card: auth: `GET /api/card` (`{ code, qr }`, issued on first use), `POST /api/card/reset`; staff: `POST /api/card/resolve` (`{ code }` → `{ id, name, picture_url }`)
+- Push: auth: `POST /api/push/token` (`{ token, platform, language }`), `DELETE /api/push/token` (`{ token }`). Pushes go out through the Expo Push Service when an order the user is the customer of becomes `ready`, is cancelled, or is deleted — see `src/lib/pushClient.js`.
 - Version: `GET /api/version` — public; `{ name, version, env }`, the build that is answering. See `VERSIONING.md`.
 
 Auth via Bearer token. Roles: `admin`, `personal`, `parishioner`.

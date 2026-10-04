@@ -94,6 +94,14 @@ app.get("/", (_req, res) => {
   res.json({ name: appName, version: appVersion });
 });
 
+// API responses are live data. Without this, some browsers (notably the
+// Samsung TV / Tizen browser showing the orders board) cache GETs and keep
+// serving a stale list no matter how often the page re-fetches.
+app.use("/api", (_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
+
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);

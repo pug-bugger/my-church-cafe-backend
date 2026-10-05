@@ -6,6 +6,7 @@ const { asyncHandler } = require("../utils/asyncHandler");
 const { emitOrderEvent } = require("../utils/orderEvents");
 const { customerCardsEnabled, findUserByCard } = require("../lib/customerCard");
 const { notifyUser } = require("../lib/pushClient");
+const { rememberCustomerName } = require("../lib/customerNames");
 
 const router = express.Router();
 
@@ -125,9 +126,8 @@ async function enrichItemsWithOptions(pool, items) {
 
 /**
  * Attach checkbox_options[] — every checkbox the item's product offers — so the
- * kitchen ticket can print a Yes/No line for each. An unticked box is never
- * written to order_item_options (see insertOrderItemOptions), so the stored
- * options alone can't tell "No" apart from "not offered on this drink".
+ * kitchen ticket can tell a ticked checkbox (printed as its bare name) from a
+ * value-style option (printed as "Name: value").
  * Print-path only; the barista UI keeps showing just the selected options.
  */
 async function attachCheckboxDefinitions(pool, items) {
@@ -559,12 +559,24 @@ router.post("/", async (req, res, next) => {
       status: "pending",
     });
 
+    // A name staff typed becomes a suggestion for the next order. Not awaited
+    // and never throws — like printing, it must not hold up or fail the order.
+    if (isStaffRole(req.user.role) && typedCustomerName) {
+      void rememberCustomerName(
+        getPool(),
+        req.user.organization_id,
+        typedCustomerName,
+      );
+    }
+
     // Best-effort kitchen ticket print — must never fail order creation.
     try {
       const pool = getPool();
-      const [orderRows] = await pool.query("SELECT * FROM orders WHERE id = ?", [
-        created.id,
-      ]);
+      // With the day's number: the ticket always leads with it.
+      const [orderRows] = await pool.query(
+        `SELECT o.*, ${orderNumberSubquery} FROM orders o WHERE o.id = ?`,
+        [created.id],
+      );
       const [orderWithItems] = await attachOrderItems(pool, orderRows);
       if (orderWithItems) {
         await attachCheckboxDefinitions(pool, orderWithItems.items);

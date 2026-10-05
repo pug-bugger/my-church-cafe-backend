@@ -22,8 +22,43 @@ const MIN_TICKET_MM = 100;
 
 const mmToLines = (mm) => Math.ceil(mm / LINE_HEIGHT_MM);
 
-// Stored option values that should read as an unticked checkbox on the ticket.
+// Stored option values that read as a ticked / unticked checkbox on the ticket.
+const POSITIVE = new Set(["yes", "true", "1"]);
 const NEGATIVE = new Set(["no", "false", "0", ""]);
+
+/**
+ * The ticket's headline: the day's order number always, then the customer's
+ * name when one was given — "#12 Anna", or just "#12".
+ */
+function ticketLabel(order) {
+  const number = `#${order.order_number ?? order.id}`;
+  const name = order.customer_name?.trim();
+  return name ? `${number} ${name}` : number;
+}
+
+/**
+ * The option lines under one item. A value-style option (size, sugar, ...)
+ * prints as "Size: Large". A checkbox prints only when ticked, and then as its
+ * bare name — "Take away", not "Take away: Yes" — while an unticked one is left
+ * off entirely, so the barista reads only what to do.
+ *
+ * `checkboxNames` is the item's checkbox definitions when the caller attached
+ * them; a stored "Yes"/"true" is treated as a ticked box either way.
+ */
+function optionLines(options, checkboxNames) {
+  const lines = [];
+  for (const opt of options) {
+    const name = opt.option_definition_name;
+    const value = String(opt.option_value_name ?? "").trim();
+    const normalized = value.toLowerCase();
+    if (checkboxNames.has(name) || POSITIVE.has(normalized)) {
+      if (!NEGATIVE.has(normalized)) lines.push(`   ${name}`);
+      continue;
+    }
+    lines.push(`   ${name}: ${value}`);
+  }
+  return lines;
+}
 
 function init() {
   return Buffer.from([ESC, 0x40]);
@@ -66,9 +101,7 @@ function buildKitchenTicket(order, items) {
     lines += tall ? 2 : 1;
   };
 
-  const label =
-    order.customer_name?.trim() || `#${order.order_number ?? order.id}`;
-  write(label, true);
+  write(ticketLabel(order), true);
   parts.push(doubleSize(false), bold(false), align(0));
 
   const createdAt = order.created_at ? new Date(order.created_at) : new Date();
@@ -90,21 +123,8 @@ function buildKitchenTicket(order, items) {
       : [];
     const checkboxNames = new Set(checkboxes.map((c) => c.name));
 
-    // Selected value-style options (size, sugar, temperature, ...).
-    for (const opt of options) {
-      if (checkboxNames.has(opt.option_definition_name)) continue;
-      write(`   ${opt.option_definition_name}: ${opt.option_value_name}`);
-    }
-
-    // Every checkbox the product offers, answered Yes or No. An unticked box is
-    // never written to order_item_options, so "no stored row" means No.
-    const ticked = new Set(
-      options
-        .filter((o) => !NEGATIVE.has(String(o.option_value_name).trim().toLowerCase()))
-        .map((o) => o.option_definition_name),
-    );
-    for (const cb of checkboxes) {
-      write(`   ${cb.name}: ${ticked.has(cb.name) ? "Yes" : "No"}`);
+    for (const line of optionLines(options, checkboxNames)) {
+      write(line);
     }
 
     if (item.comment) {

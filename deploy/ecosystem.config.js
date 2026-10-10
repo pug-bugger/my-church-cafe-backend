@@ -36,7 +36,9 @@ module.exports = {
       // Long enough for in-flight requests and socket disconnects to settle.
       kill_timeout: 10000,
       listen_timeout: 10000,
-      max_memory_restart: "400M",
+      // Well under the box's 1 GB: restart a leak before it starves MySQL. It
+      // idles at ~75 MB.
+      max_memory_restart: "250M",
       autorestart: true,
 
       error_file: "/var/www/church-cafe-backend/logs/error.log",

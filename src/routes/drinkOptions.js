@@ -2,6 +2,13 @@ const express = require("express");
 const { getPool } = require("../config/db");
 const { authMiddleware, requireRole } = require("../middleware/auth");
 const { hasColumn } = require("../utils/columns");
+const {
+  hasOptionAvailability,
+  UNTIL_SQL,
+} = require("../utils/drinkOptionsForProducts");
+const { emitProductEvent } = require("../utils/productEvents");
+const { nextMidnightDatetime } = require("../utils/untilMidnight");
+const { asyncHandler } = require("../utils/asyncHandler");
 
 const router = express.Router();
 
@@ -69,20 +76,23 @@ router.get("/", async (_req, res, next) => {
     // public and feeds the menu, so it must keep answering without them.
     const withCheckboxDefault = await hasCheckboxDefault(pool);
     const withValueDefault = await hasValueDefault(pool);
+    const withAvailability = await hasOptionAvailability(pool);
     const [defs] = await pool.query(
-      `SELECT id, name, option_key, type, checkbox_extra_price, sort_order
-              ${withCheckboxDefault ? ", checkbox_default" : ""}
-       FROM drink_option_definitions
-       ORDER BY sort_order ASC, name ASC`,
+      `SELECT d.id, d.name, d.option_key, d.type, d.checkbox_extra_price, d.sort_order
+              ${withCheckboxDefault ? ", d.checkbox_default" : ""}
+              ${withAvailability ? `, ${UNTIL_SQL("d")} AS unavailable_until` : ""}
+       FROM drink_option_definitions d
+       ORDER BY d.sort_order ASC, d.name ASC`,
     );
     if (!defs.length) return res.json([]);
     const ids = defs.map((d) => d.id);
     const [vals] = await pool.query(
-      `SELECT id, option_definition_id, label, extra_price, sort_order
-              ${withValueDefault ? ", is_default" : ""}
-       FROM drink_option_values
-       WHERE option_definition_id IN (?)
-       ORDER BY sort_order ASC, id ASC`,
+      `SELECT v.id, v.option_definition_id, v.label, v.extra_price, v.sort_order
+              ${withValueDefault ? ", v.is_default" : ""}
+              ${withAvailability ? `, ${UNTIL_SQL("v")} AS unavailable_until` : ""}
+       FROM drink_option_values v
+       WHERE v.option_definition_id IN (?)
+       ORDER BY v.sort_order ASC, v.id ASC`,
       [ids],
     );
     const byDef = new Map();
@@ -95,6 +105,7 @@ router.get("/", async (_req, res, next) => {
         label: v.label,
         extra_price: Number(v.extra_price ?? 0),
         is_default: Boolean(v.is_default),
+        unavailable_until: v.unavailable_until ?? null,
         sort_order: v.sort_order,
       });
     }
@@ -105,6 +116,7 @@ router.get("/", async (_req, res, next) => {
       type: d.type,
       checkbox_extra_price: Number(d.checkbox_extra_price ?? 0),
       checkbox_default: Boolean(d.checkbox_default),
+      unavailable_until: d.unavailable_until ?? null,
       sort_order: d.sort_order,
       values: byDef.get(d.id) || [],
     }));
@@ -115,6 +127,74 @@ router.get("/", async (_req, res, next) => {
 });
 
 router.use(authMiddleware);
+
+/** Read `{ available }` off a request body; undefined when it isn't a boolean. */
+function readAvailable(value) {
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  return undefined;
+}
+
+/**
+ * Mark one option row sold out until midnight, or bring it back.
+ *
+ * Staff, not just admins: this is the barista at the counter finding the oat
+ * milk is gone. It is only ever "until tomorrow" — taking a choice away for
+ * good is deleting it in Manage. Options are shared between products, so the
+ * change is announced as a product change and every menu and terminal reloads.
+ */
+function setUnavailable(table) {
+  return asyncHandler(async (req, res) => {
+    const available = readAvailable(req.body?.available);
+    if (available === undefined) {
+      return res.status(400).json({ error: "available must be a boolean" });
+    }
+    const pool = getPool();
+    if (!(await hasOptionAvailability(pool))) {
+      return res.status(503).json({
+        error:
+          "Option availability needs scripts/migration_option_availability.sql to be run first",
+      });
+    }
+    const id = Number(table === "drink_option_values" ? req.params.valueId : req.params.id);
+    // Table name is one of two code constants, never request data.
+    const [found] = await pool.query(
+      `SELECT id ${table === "drink_option_definitions" ? ", type" : ""} FROM ${table} WHERE id = ?`,
+      [id],
+    );
+    if (!found.length) return res.status(404).json({ error: "Not found" });
+    if (table === "drink_option_definitions" && found[0].type !== "checkbox") {
+      // A picklist is never sold out as a whole — its choices are.
+      return res
+        .status(400)
+        .json({ error: "Mark a picklist's choices unavailable, not the option" });
+    }
+    await pool.query(`UPDATE ${table} SET unavailable_until = ? WHERE id = ?`, [
+      available ? null : nextMidnightDatetime(),
+      id,
+    ]);
+    const [[row]] = await pool.query(
+      `SELECT ${UNTIL_SQL("t")} AS unavailable_until FROM ${table} t WHERE t.id = ?`,
+      [id],
+    );
+    emitProductEvent(req.app.get("io"), "product:updated", { options: true });
+    return res.json({ success: true, unavailable_until: row.unavailable_until });
+  });
+}
+
+// Staff: a picklist choice ("Oat milk") sold out until tomorrow, or back.
+router.patch(
+  "/values/:valueId/availability",
+  requireRole("admin", "personal"),
+  setUnavailable("drink_option_values"),
+);
+
+// Staff: a checkbox option ("Whipped cream") sold out until tomorrow, or back.
+router.patch(
+  "/:id/availability",
+  requireRole("admin", "personal"),
+  setUnavailable("drink_option_definitions"),
+);
 
 // Admin: create definition (optional initial values for select)
 router.post("/", requireRole("admin"), async (req, res, next) => {

@@ -13,6 +13,7 @@ const { emitProductEvent } = require("../utils/productEvents");
 const { ensureUploadDir } = require("../utils/uploadDir");
 const { asyncHandler } = require("../utils/asyncHandler");
 const { hasColumn } = require("../utils/columns");
+const { nextMidnightDatetime } = require("../utils/untilMidnight");
 
 const router = express.Router();
 
@@ -228,37 +229,61 @@ async function syncProductDrinkOptions(conn, productId, definitionIds) {
   );
 }
 
-// Admin: set product availability (show / hide forever / hide until midnight tonight)
+/**
+ * Staff: set product availability — show, hide forever, or sold out until
+ * midnight tonight.
+ *
+ * Admins can do all three. Baristas (`personal`) get only the counter's case:
+ * mark something sold out until tomorrow from the terminal, and bring back
+ * something that was. Hiding a product for good, or un-hiding one an admin
+ * hid, stays a Manage decision.
+ */
 router.patch(
   "/:id/availability",
-  requireRole("admin"),
-  async (req, res, next) => {
-    try {
-      const { available, hide_until_midnight } = req.body;
-      if (typeof available !== "boolean" && available !== 0 && available !== 1) {
-        return res.status(400).json({ error: "available must be a boolean" });
-      }
-      let dbAvailableUntil = null;
-      if (!available && hide_until_midnight) {
-        // Compute server-local midnight as MySQL DATETIME (YYYY-MM-DD HH:MM:SS)
-        const midnight = new Date();
-        midnight.setHours(24, 0, 0, 0);
-        const pad = (n) => String(n).padStart(2, "0");
-        dbAvailableUntil = `${midnight.getFullYear()}-${pad(midnight.getMonth() + 1)}-${pad(midnight.getDate())} ${pad(midnight.getHours())}:${pad(midnight.getMinutes())}:${pad(midnight.getSeconds())}`;
-      }
-      const pool = getPool();
-      await pool.query(
-        "UPDATE products SET available = ?, available_until = ? WHERE id = ?",
-        [available ? 1 : 0, dbAvailableUntil, req.params.id],
-      );
-      emitProductEvent(req.app.get("io"), "product:updated", {
-        id: Number(req.params.id),
-      });
-      return res.json({ success: true });
-    } catch (err) {
-      return next(err);
+  requireRole("admin", "personal"),
+  asyncHandler(async (req, res) => {
+    const { available, hide_until_midnight } = req.body;
+    if (typeof available !== "boolean" && available !== 0 && available !== 1) {
+      return res.status(400).json({ error: "available must be a boolean" });
     }
-  },
+    const untilMidnight = !available && Boolean(hide_until_midnight);
+    const pool = getPool();
+    const [found] = await pool.query(
+      "SELECT id, available, available_until FROM products WHERE id = ?",
+      [req.params.id],
+    );
+    if (!found.length) return res.status(404).json({ error: "Product not found" });
+
+    if (req.user.role !== "admin") {
+      const temporarilyHidden =
+        !found[0].available && found[0].available_until != null;
+      const allowed = available ? temporarilyHidden : untilMidnight;
+      if (!allowed) {
+        return res.status(403).json({
+          error: "Only an admin can hide a product permanently or bring it back",
+        });
+      }
+    }
+
+    await pool.query(
+      "UPDATE products SET available = ?, available_until = ? WHERE id = ?",
+      [available ? 1 : 0, untilMidnight ? nextMidnightDatetime() : null, req.params.id],
+    );
+    // Read it back so the client gets the restore time in the same shape a
+    // GET /api/products row carries it.
+    const [[row]] = await pool.query(
+      "SELECT available, available_until FROM products WHERE id = ?",
+      [req.params.id],
+    );
+    emitProductEvent(req.app.get("io"), "product:updated", {
+      id: Number(req.params.id),
+    });
+    return res.json({
+      success: true,
+      available: Boolean(row.available),
+      available_until: row.available_until,
+    });
+  }),
 );
 
 /**

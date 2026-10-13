@@ -4,6 +4,17 @@
 
 const { hasColumn } = require("./columns");
 
+/**
+ * Whether options can be marked sold out yet (migration_option_availability
+ * adds the column to both tables at once, so one probe answers for both).
+ */
+const hasOptionAvailability = (conn) =>
+  hasColumn(conn, "drink_option_values", "unavailable_until");
+
+/** `alias.unavailable_until`, or NULL once that moment has passed. */
+const UNTIL_SQL = (alias) =>
+  `IF(${alias}.unavailable_until > NOW(), ${alias}.unavailable_until, NULL)`;
+
 async function fetchDrinkOptionsForProducts(pool, productIds) {
   if (!productIds.length) return new Map();
   // The default columns arrive with migration_option_defaults; until it is run
@@ -19,6 +30,10 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
     "drink_option_definitions",
     "checkbox_default",
   );
+  // "Sold out until tomorrow" arrives with migration_option_availability. A
+  // time already past means available again, so only a future one is sent —
+  // no client ever has to compare clocks with the server to know.
+  const withAvailability = await hasOptionAvailability(pool);
   const [rows] = await pool.query(
     `SELECT pdo.product_id,
             d.id AS def_id,
@@ -27,11 +42,13 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
             d.type,
             d.checkbox_extra_price,
             ${withCheckboxDefault ? "d.checkbox_default," : ""}
+            ${withAvailability ? `${UNTIL_SQL("d")} AS def_unavailable_until,` : ""}
             pdo.sort_order AS pdo_sort,
             v.id AS value_id,
             v.label AS value_label,
             v.extra_price AS value_extra,
             ${withValueDefault ? "v.is_default AS value_default," : ""}
+            ${withAvailability ? `${UNTIL_SQL("v")} AS value_unavailable_until,` : ""}
             v.sort_order AS value_sort
      FROM product_drink_options pdo
      INNER JOIN drink_option_definitions d ON d.id = pdo.option_definition_id
@@ -56,6 +73,7 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
         type: row.type,
         checkbox_extra_price: Number(row.checkbox_extra_price ?? 0),
         checkbox_default: Boolean(row.checkbox_default),
+        unavailable_until: row.def_unavailable_until ?? null,
         _pdo_sort: row.pdo_sort ?? 0,
         values: [],
       });
@@ -67,6 +85,7 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
         label: row.value_label,
         extra_price: Number(row.value_extra ?? 0),
         is_default: Boolean(row.value_default),
+        unavailable_until: row.value_unavailable_until ?? null,
         sort_order: row.value_sort,
       });
     }
@@ -91,11 +110,14 @@ function normalizeDrinkOptionsList(rawList) {
     type: d.type,
     checkbox_extra_price: d.checkbox_extra_price,
     checkbox_default: Boolean(d.checkbox_default),
+    unavailable_until: d.unavailable_until ?? null,
     values: d.values || [],
   }));
 }
 
 module.exports = {
+  hasOptionAvailability,
+  UNTIL_SQL,
   fetchDrinkOptionsForProducts,
   normalizeDrinkOptionsList,
 };

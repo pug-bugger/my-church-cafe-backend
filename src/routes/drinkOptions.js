@@ -40,6 +40,29 @@ async function setDefaultValue(pool, definitionId, valueId) {
   );
 }
 
+/** Both `drink_option_definitions.name` and `drink_option_values.label`. */
+const NAME_MAX_LENGTH = 100;
+
+/**
+ * Read a rename off a request body: the trimmed text, or undefined when the
+ * field wasn't sent. Blank or over-long throws a 400 rather than being read as
+ * "leave unchanged" — an admin who cleared the field meant something by it.
+ */
+function readName(value, field) {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = String(value).trim();
+  if (!trimmed) {
+    throw Object.assign(new Error(`${field} must not be empty`), { status: 400 });
+  }
+  if (trimmed.length > NAME_MAX_LENGTH) {
+    throw Object.assign(
+      new Error(`${field} must be ${NAME_MAX_LENGTH} characters or fewer`),
+      { status: 400 },
+    );
+  }
+  return trimmed;
+}
+
 function slugify(name) {
   const s = String(name)
     .toLowerCase()
@@ -264,10 +287,13 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
   }
 });
 
-router.put("/:id", requireRole("admin"), async (req, res, next) => {
-  try {
-    const { name, type, checkbox_extra_price, checkbox_default, sort_order } =
+router.put(
+  "/:id",
+  requireRole("admin"),
+  asyncHandler(async (req, res) => {
+    const { type, checkbox_extra_price, checkbox_default, sort_order } =
       req.body;
+    const name = readName(req.body.name, "name");
     // Charged to customers, so validate rather than coerce (see PUT /values).
     if (checkbox_extra_price != null) {
       const n = Number(checkbox_extra_price);
@@ -314,11 +340,12 @@ router.put("/:id", requireRole("admin"), async (req, res, next) => {
         req.params.id,
       ],
     );
+    // Shared by every product that offers it, so every open terminal and menu
+    // reloads — a renamed option or a new price must not wait for a refresh.
+    emitProductEvent(req.app.get("io"), "product:updated", { options: true });
     return res.json({ success: true });
-  } catch (err) {
-    return next(err);
-  }
-});
+  }),
+);
 
 router.delete("/:id", requireRole("admin"), async (req, res, next) => {
   try {
@@ -366,9 +393,12 @@ router.post("/:id/values", requireRole("admin"), async (req, res, next) => {
   }
 });
 
-router.put("/values/:valueId", requireRole("admin"), async (req, res, next) => {
-  try {
-    const { label, extra_price, sort_order, is_default } = req.body;
+router.put(
+  "/values/:valueId",
+  requireRole("admin"),
+  asyncHandler(async (req, res) => {
+    const { extra_price, sort_order, is_default } = req.body;
+    const label = readName(req.body.label, "label");
     // This sets a price customers are charged, so it validates rather than
     // silently coercing: NaN or a negative would otherwise become a discount.
     if (extra_price != null) {
@@ -385,6 +415,21 @@ router.put("/values/:valueId", requireRole("admin"), async (req, res, next) => {
       [req.params.valueId],
     );
     if (!existing.length) return res.status(404).json({ error: "Not found" });
+    if (label !== undefined) {
+      // Orders name their choice by label and pricing takes the first row that
+      // matches, so a second "Oat milk" in the same option could never be
+      // picked — refuse the rename instead of creating one.
+      const [clash] = await pool.query(
+        `SELECT id FROM drink_option_values
+         WHERE option_definition_id = ? AND id <> ? AND LOWER(TRIM(label)) = LOWER(?)`,
+        [existing[0].option_definition_id, req.params.valueId, label],
+      );
+      if (clash.length) {
+        return res
+          .status(409)
+          .json({ error: "This option already has a choice with that label" });
+      }
+    }
     const wantsDefault = readDefaultFlag(is_default);
     if (wantsDefault !== undefined && (await hasValueDefault(pool))) {
       if (wantsDefault) {
@@ -417,11 +462,12 @@ router.put("/values/:valueId", requireRole("admin"), async (req, res, next) => {
         req.params.valueId,
       ],
     );
+    // A terminal still holding the old label would send it, and an unmatched
+    // label prices at 0 — so every open client reloads the catalog now.
+    emitProductEvent(req.app.get("io"), "product:updated", { options: true });
     return res.json({ success: true });
-  } catch (err) {
-    return next(err);
-  }
-});
+  }),
+);
 
 router.delete(
   "/values/:valueId",

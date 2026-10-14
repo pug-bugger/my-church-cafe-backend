@@ -119,6 +119,25 @@ router.post(
   })
 );
 
+/**
+ * Trade a still-valid token for a fresh one. The clients call this when they
+ * are opened a day or more after their token was issued, so a session expires
+ * only after `SESSION_IDLE_DAYS` without the app being opened at all.
+ *
+ * Re-reads the account rather than copying the old claims: a role changed in
+ * the meantime takes effect, and a deleted account gets a 401, which the
+ * clients treat as being signed out.
+ */
+router.post(
+  "/refresh",
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const user = await loadSessionUser(getPool(), req.user.id);
+    if (!user) return res.status(401).json({ error: "Invalid token" });
+    return res.json(sessionResponse(user));
+  })
+);
+
 /** `{ token, user }` for a row shaped like `loadSessionUser`'s. */
 function sessionResponse(user) {
   const role = user.role || "parishioner";

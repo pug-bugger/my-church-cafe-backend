@@ -5,8 +5,12 @@ function signJwt(payload) {
   return jwt.sign(payload, auth.jwtSecret, { expiresIn: auth.jwtExpiresIn });
 }
 
-function verifyJwt(token) {
-  return jwt.verify(token, auth.jwtSecret);
+/**
+ * Verify a token's signature and, unless `ignoreExpiration` is set, its expiry.
+ * Only a sign-out step should ever skip the expiry check.
+ */
+function verifyJwt(token, { ignoreExpiration = false } = {}) {
+  return jwt.verify(token, auth.jwtSecret, { ignoreExpiration });
 }
 
 module.exports = { signJwt, verifyJwt };

@@ -39,6 +39,18 @@ const uploadMaxImageMB = (() => {
   return 15;
 })();
 
+/**
+ * Days a session survives without the app being opened. A token lives this
+ * long, and the clients trade it for a fresh one (POST /api/auth/refresh) when
+ * they are opened a day or more after it was issued — so the window counts
+ * from the last time the app was used, not from sign-in.
+ */
+const sessionIdleDays = (() => {
+  const n = Number(process.env.SESSION_IDLE_DAYS);
+  if (Number.isFinite(n) && n >= 1) return Math.floor(n);
+  return 60;
+})();
+
 module.exports = {
   nodeEnv: process.env.NODE_ENV || "development",
   port: Number(process.env.PORT || 4000),
@@ -54,7 +66,10 @@ module.exports = {
   },
   auth: {
     jwtSecret: required("JWT_SECRET", "change_this_secret"),
-    jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
+    sessionIdleDays,
+    // Deliberately not JWT_EXPIRES_IN: existing .env files pin that to 7d,
+    // which would quietly cut the two-month window down to a week.
+    jwtExpiresIn: `${sessionIdleDays}d`,
   },
   google: {
     // OAuth client ids whose ID tokens are accepted (comma-separated: the web

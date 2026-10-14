@@ -1,13 +1,14 @@
 const express = require("express");
 const { getPool } = require("../config/db");
-const { authMiddleware } = require("../middleware/auth");
+const {
+  authMiddleware,
+  authMiddlewareAllowExpired,
+} = require("../middleware/auth");
 const { asyncHandler } = require("../utils/asyncHandler");
 const { isExpoPushToken } = require("../lib/pushClient");
 const { normalizeLanguage } = require("../lib/notificationText");
 
 const router = express.Router();
-
-router.use(authMiddleware);
 
 const PLATFORMS = ["ios", "android"];
 
@@ -19,6 +20,7 @@ function isMissingTable(err) {
 // whenever the app's language changes, so the server writes pushes in it.
 router.post(
   "/token",
+  authMiddleware,
   asyncHandler(async (req, res) => {
     const { token, platform, language } = req.body ?? {};
     if (!isExpoPushToken(token)) {
@@ -50,8 +52,11 @@ router.post(
 );
 
 // Unregister this device (sign-out). Only the caller's own token can be removed.
+// An expired session may still do this — it is how a device that went unopened
+// until its session lapsed stops receiving that account's pushes.
 router.delete(
   "/token",
+  authMiddlewareAllowExpired,
   asyncHandler(async (req, res) => {
     const token = req.body?.token;
     if (typeof token !== "string" || !token) {

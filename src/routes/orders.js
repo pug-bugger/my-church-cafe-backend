@@ -7,6 +7,7 @@ const { emitOrderEvent } = require("../utils/orderEvents");
 const { customerCardsEnabled, findUserByCard } = require("../lib/customerCard");
 const { notifyUser } = require("../lib/pushClient");
 const { rememberCustomerName } = require("../lib/customerNames");
+const { hasOptionTranslations } = require("../utils/drinkOptionsForProducts");
 
 const router = express.Router();
 
@@ -237,8 +238,10 @@ async function attachOptionPricing(conn, normalizedItems) {
       [defIds],
     );
     defs = defRows;
+    const withTranslations = await hasOptionTranslations(conn);
     const [valueRows] = await conn.query(
       `SELECT option_definition_id, label, extra_price
+              ${withTranslations ? ", label_lt, label_ru" : ""}
          FROM drink_option_values
         WHERE option_definition_id IN (?)
         ORDER BY sort_order ASC, id ASC`,
@@ -255,11 +258,24 @@ async function attachOptionPricing(conn, normalizedItems) {
   // Selections arrive as labels rather than value ids, so price lookup is by
   // label. `ORDER BY sort_order, id` above makes a duplicate label deterministic
   // — first one wins — rather than whichever row the engine happened to return.
-  const priceByDefAndLabel = new Map();
-  for (const v of values) {
-    const key = `${v.option_definition_id}:${normalizeLabel(v.label)}`;
-    if (!priceByDefAndLabel.has(key)) {
-      priceByDefAndLabel.set(key, Number(v.extra_price ?? 0));
+  //
+  // A choice is also found by its Lithuanian or Russian label, and is then
+  // recorded under its English one: the kitchen ticket and the order history
+  // always read in English, whatever language the terminal was showing. Clients
+  // send the English label anyway — this is the backstop. The English label is
+  // indexed first, so it wins over a translation that happens to match another
+  // choice's English text.
+  const valueByDefAndLabel = new Map();
+  for (const field of ["label", "label_lt", "label_ru"]) {
+    for (const v of values) {
+      if (!v[field]) continue;
+      const key = `${v.option_definition_id}:${normalizeLabel(v[field])}`;
+      if (!valueByDefAndLabel.has(key)) {
+        valueByDefAndLabel.set(key, {
+          label: v.label,
+          price: Number(v.extra_price ?? 0),
+        });
+      }
     }
   }
 
@@ -278,9 +294,9 @@ async function attachOptionPricing(conn, normalizedItems) {
         item.optionRows.push([defId, def.name, "Yes", price]);
         item.surcharge += price;
       } else {
-        const price =
-          priceByDefAndLabel.get(`${defId}:${normalizeLabel(val)}`) ?? 0;
-        item.optionRows.push([defId, def.name, val, price]);
+        const match = valueByDefAndLabel.get(`${defId}:${normalizeLabel(val)}`);
+        const price = match?.price ?? 0;
+        item.optionRows.push([defId, def.name, match?.label ?? val, price]);
         item.surcharge += price;
       }
     }

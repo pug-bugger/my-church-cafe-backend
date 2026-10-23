@@ -4,6 +4,8 @@ const { authMiddleware, requireRole } = require("../middleware/auth");
 const { hasColumn } = require("../utils/columns");
 const {
   hasOptionAvailability,
+  hasOptionTranslations,
+  readTranslation,
   UNTIL_SQL,
 } = require("../utils/drinkOptionsForProducts");
 const { emitProductEvent } = require("../utils/productEvents");
@@ -63,6 +65,21 @@ function readName(value, field) {
   return trimmed;
 }
 
+/**
+ * The `SET col = ?` pairs for whichever translations a request sent, so a PUT
+ * that leaves them out leaves them alone. Empty when the columns aren't there
+ * yet — the rest of the update still goes through.
+ */
+async function translationUpdates(pool, body, columns) {
+  if (!(await hasOptionTranslations(pool))) return [];
+  const updates = [];
+  for (const column of columns) {
+    const value = readTranslation(body?.[column], column);
+    if (value !== undefined) updates.push([column, value]);
+  }
+  return updates;
+}
+
 function slugify(name) {
   const s = String(name)
     .toLowerCase()
@@ -100,9 +117,11 @@ router.get("/", async (_req, res, next) => {
     const withCheckboxDefault = await hasCheckboxDefault(pool);
     const withValueDefault = await hasValueDefault(pool);
     const withAvailability = await hasOptionAvailability(pool);
+    const withTranslations = await hasOptionTranslations(pool);
     const [defs] = await pool.query(
       `SELECT d.id, d.name, d.option_key, d.type, d.checkbox_extra_price, d.sort_order
               ${withCheckboxDefault ? ", d.checkbox_default" : ""}
+              ${withTranslations ? ", d.name_lt, d.name_ru" : ""}
               ${withAvailability ? `, ${UNTIL_SQL("d")} AS unavailable_until` : ""}
        FROM drink_option_definitions d
        ORDER BY d.sort_order ASC, d.name ASC`,
@@ -112,6 +131,7 @@ router.get("/", async (_req, res, next) => {
     const [vals] = await pool.query(
       `SELECT v.id, v.option_definition_id, v.label, v.extra_price, v.sort_order
               ${withValueDefault ? ", v.is_default" : ""}
+              ${withTranslations ? ", v.label_lt, v.label_ru" : ""}
               ${withAvailability ? `, ${UNTIL_SQL("v")} AS unavailable_until` : ""}
        FROM drink_option_values v
        WHERE v.option_definition_id IN (?)
@@ -126,6 +146,8 @@ router.get("/", async (_req, res, next) => {
       byDef.get(v.option_definition_id).push({
         id: v.id,
         label: v.label,
+        label_lt: v.label_lt ?? null,
+        label_ru: v.label_ru ?? null,
         extra_price: Number(v.extra_price ?? 0),
         is_default: Boolean(v.is_default),
         unavailable_until: v.unavailable_until ?? null,
@@ -135,6 +157,8 @@ router.get("/", async (_req, res, next) => {
     const out = defs.map((d) => ({
       id: d.id,
       name: d.name,
+      name_lt: d.name_lt ?? null,
+      name_ru: d.name_ru ?? null,
       option_key: d.option_key,
       type: d.type,
       checkbox_extra_price: Number(d.checkbox_extra_price ?? 0),
@@ -239,14 +263,16 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
     const pool = getPool();
     const withCheckboxDefault = await hasCheckboxDefault(pool);
     const withValueDefault = await hasValueDefault(pool);
+    const withTranslations = await hasOptionTranslations(pool);
     const baseKey = slugify(name);
     const option_key = await ensureUniqueOptionKey(pool, baseKey, null);
     const opensTicked =
       type === "checkbox" && readDefaultFlag(checkbox_default) === true;
     const [r] = await pool.query(
       `INSERT INTO drink_option_definitions (name, option_key, type, checkbox_extra_price, sort_order
-              ${withCheckboxDefault ? ", checkbox_default" : ""})
-       VALUES (?, ?, ?, ?, ?${withCheckboxDefault ? ", ?" : ""})`,
+              ${withCheckboxDefault ? ", checkbox_default" : ""}
+              ${withTranslations ? ", name_lt, name_ru" : ""})
+       VALUES (?, ?, ?, ?, ?${withCheckboxDefault ? ", ?" : ""}${withTranslations ? ", ?, ?" : ""})`,
       [
         name,
         option_key,
@@ -254,6 +280,12 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
         type === "checkbox" ? Number(checkbox_extra_price ?? 0) : 0,
         sort_order ?? 0,
         ...(withCheckboxDefault ? [opensTicked ? 1 : 0] : []),
+        ...(withTranslations
+          ? [
+              readTranslation(req.body.name_lt, "name_lt") ?? null,
+              readTranslation(req.body.name_ru, "name_ru") ?? null,
+            ]
+          : []),
       ],
     );
     const defId = r.insertId;
@@ -274,10 +306,17 @@ router.post("/", requireRole("admin"), async (req, res, next) => {
         Number(v.extra_price ?? 0),
         v.sort_order ?? i,
         ...(withValueDefault ? [i === defaultIndex ? 1 : 0] : []),
+        ...(withTranslations
+          ? [
+              readTranslation(v.label_lt, "label_lt") ?? null,
+              readTranslation(v.label_ru, "label_ru") ?? null,
+            ]
+          : []),
       ]);
       await pool.query(
         `INSERT INTO drink_option_values (option_definition_id, label, extra_price, sort_order
-                ${withValueDefault ? ", is_default" : ""}) VALUES ?`,
+                ${withValueDefault ? ", is_default" : ""}
+                ${withTranslations ? ", label_lt, label_ru" : ""}) VALUES ?`,
         [rows],
       );
     }
@@ -321,6 +360,10 @@ router.put(
     const opensTicked = readDefaultFlag(checkbox_default);
     const withCheckboxDefault =
       opensTicked !== undefined && (await hasCheckboxDefault(pool));
+    const translations = await translationUpdates(pool, req.body, [
+      "name_lt",
+      "name_ru",
+    ]);
     await pool.query(
       `UPDATE drink_option_definitions SET
         name = COALESCE(?, name),
@@ -328,6 +371,7 @@ router.put(
         type = COALESCE(?, type),
         checkbox_extra_price = COALESCE(?, checkbox_extra_price),
         ${withCheckboxDefault ? "checkbox_default = ?," : ""}
+        ${translations.map(([column]) => `${column} = ?,`).join(" ")}
         sort_order = COALESCE(?, sort_order)
        WHERE id = ?`,
       [
@@ -336,6 +380,7 @@ router.put(
         type || null,
         checkbox_extra_price != null ? Number(checkbox_extra_price) : null,
         ...(withCheckboxDefault ? [opensTicked ? 1 : 0] : []),
+        ...translations.map(([, value]) => value),
         sort_order ?? null,
         req.params.id,
       ],
@@ -374,14 +419,22 @@ router.post("/:id/values", requireRole("admin"), async (req, res, next) => {
         .status(400)
         .json({ error: "checkbox options do not use value rows" });
     }
+    const withTranslations = await hasOptionTranslations(pool);
     const [r] = await pool.query(
-      `INSERT INTO drink_option_values (option_definition_id, label, extra_price, sort_order)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO drink_option_values (option_definition_id, label, extra_price, sort_order
+              ${withTranslations ? ", label_lt, label_ru" : ""})
+       VALUES (?, ?, ?, ?${withTranslations ? ", ?, ?" : ""})`,
       [
         req.params.id,
         label,
         Number(extra_price ?? 0),
         sort_order ?? 0,
+        ...(withTranslations
+          ? [
+              readTranslation(req.body.label_lt, "label_lt") ?? null,
+              readTranslation(req.body.label_ru, "label_ru") ?? null,
+            ]
+          : []),
       ],
     );
     if (readDefaultFlag(is_default) === true && (await hasValueDefault(pool))) {
@@ -447,10 +500,15 @@ router.put(
         );
       }
     }
+    const translations = await translationUpdates(pool, req.body, [
+      "label_lt",
+      "label_ru",
+    ]);
     await pool.query(
       `UPDATE drink_option_values SET
         label = COALESCE(?, label),
         extra_price = COALESCE(?, extra_price),
+        ${translations.map(([column]) => `${column} = ?,`).join(" ")}
         sort_order = COALESCE(?, sort_order)
        WHERE id = ?`,
       [
@@ -458,6 +516,7 @@ router.put(
         // `!= null` rather than `||` so that 0 — "this option is now free" —
         // actually persists instead of being read as "leave unchanged".
         extra_price != null ? Number(extra_price) : null,
+        ...translations.map(([, value]) => value),
         sort_order ?? null,
         req.params.valueId,
       ],

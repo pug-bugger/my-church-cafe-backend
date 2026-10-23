@@ -11,6 +11,30 @@ const { hasColumn } = require("./columns");
 const hasOptionAvailability = (conn) =>
   hasColumn(conn, "drink_option_values", "unavailable_until");
 
+/**
+ * Whether options carry Lithuanian / Russian names yet
+ * (migration_option_translations adds them to both tables at once).
+ */
+const hasOptionTranslations = (conn) =>
+  hasColumn(conn, "drink_option_definitions", "name_lt");
+
+/**
+ * A translation off a request body: the trimmed text, null to clear it, or
+ * undefined when the field wasn't sent. Unlike the English name a blank
+ * translation is allowed — it means "fall back to English".
+ */
+function readTranslation(value, field) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = String(value).trim();
+  if (trimmed.length > 100) {
+    throw Object.assign(new Error(`${field} must be 100 characters or fewer`), {
+      status: 400,
+    });
+  }
+  return trimmed || null;
+}
+
 /** `alias.unavailable_until`, or NULL once that moment has passed. */
 const UNTIL_SQL = (alias) =>
   `IF(${alias}.unavailable_until > NOW(), ${alias}.unavailable_until, NULL)`;
@@ -34,10 +58,12 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
   // time already past means available again, so only a future one is sent —
   // no client ever has to compare clocks with the server to know.
   const withAvailability = await hasOptionAvailability(pool);
+  const withTranslations = await hasOptionTranslations(pool);
   const [rows] = await pool.query(
     `SELECT pdo.product_id,
             d.id AS def_id,
             d.name AS def_name,
+            ${withTranslations ? "d.name_lt AS def_name_lt, d.name_ru AS def_name_ru," : ""}
             d.option_key,
             d.type,
             d.checkbox_extra_price,
@@ -46,6 +72,7 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
             pdo.sort_order AS pdo_sort,
             v.id AS value_id,
             v.label AS value_label,
+            ${withTranslations ? "v.label_lt AS value_label_lt, v.label_ru AS value_label_ru," : ""}
             v.extra_price AS value_extra,
             ${withValueDefault ? "v.is_default AS value_default," : ""}
             ${withAvailability ? `${UNTIL_SQL("v")} AS value_unavailable_until,` : ""}
@@ -69,6 +96,8 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
       defs.set(row.def_id, {
         id: row.def_id,
         name: row.def_name,
+        name_lt: row.def_name_lt ?? null,
+        name_ru: row.def_name_ru ?? null,
         option_key: row.option_key,
         type: row.type,
         checkbox_extra_price: Number(row.checkbox_extra_price ?? 0),
@@ -83,6 +112,8 @@ async function fetchDrinkOptionsForProducts(pool, productIds) {
       def.values.push({
         id: row.value_id,
         label: row.value_label,
+        label_lt: row.value_label_lt ?? null,
+        label_ru: row.value_label_ru ?? null,
         extra_price: Number(row.value_extra ?? 0),
         is_default: Boolean(row.value_default),
         unavailable_until: row.value_unavailable_until ?? null,
@@ -106,6 +137,8 @@ function normalizeDrinkOptionsList(rawList) {
   return rawList.map((d) => ({
     id: d.id,
     name: d.name,
+    name_lt: d.name_lt ?? null,
+    name_ru: d.name_ru ?? null,
     option_key: d.option_key,
     type: d.type,
     checkbox_extra_price: d.checkbox_extra_price,
@@ -117,6 +150,8 @@ function normalizeDrinkOptionsList(rawList) {
 
 module.exports = {
   hasOptionAvailability,
+  hasOptionTranslations,
+  readTranslation,
   UNTIL_SQL,
   fetchDrinkOptionsForProducts,
   normalizeDrinkOptionsList,

@@ -13,6 +13,7 @@ const {
   findLinkByUser,
   insertLink,
 } = require("../lib/googleAuth");
+const kreoAuth = require("../lib/kreoAuth");
 
 const router = express.Router();
 
@@ -174,6 +175,30 @@ async function loadSessionUser(pool, userId) {
   return rows[0] ?? null;
 }
 
+/**
+ * A new parishioner with no password, for a first sign-in through Google or
+ * Kreo. Resolves the new user id.
+ */
+async function createPasswordlessUser(pool, { name, email, picture }, organization) {
+  const [roleRows] = await pool.query(
+    "SELECT id FROM roles WHERE name = ? LIMIT 1",
+    ["parishioner"]
+  );
+  const organizationId = await resolveOrganizationId(pool, organization);
+  const [result] = await pool.query(
+    `INSERT INTO users (name, email, password_hash, picture_url, role_id, organization_id)
+     VALUES (?, ?, NULL, ?, ?, ?)`,
+    [
+      (name || email.split("@")[0]).slice(0, 100),
+      email,
+      picture && picture.length <= 512 ? picture : null,
+      roleRows.length ? roleRows[0].id : null,
+      organizationId,
+    ]
+  );
+  return result.insertId;
+}
+
 // ── Sign in with Google ─────────────────────────────────────────────────────
 
 /**
@@ -250,32 +275,11 @@ router.post(
           }
           await insertLink(pool, userId, profile);
         } else {
-          const [roleRows] = await pool.query(
-            "SELECT id FROM roles WHERE name = ? LIMIT 1",
-            ["parishioner"]
-          );
-          const organizationId = await resolveOrganizationId(
+          userId = await createPasswordlessUser(
             pool,
+            profile,
             req.body?.organization
           );
-          const name =
-            (profile.name || profile.email.split("@")[0]).slice(0, 100);
-          const picture =
-            profile.picture && profile.picture.length <= 512
-              ? profile.picture
-              : null;
-          const [result] = await pool.query(
-            `INSERT INTO users (name, email, password_hash, picture_url, role_id, organization_id)
-             VALUES (?, ?, NULL, ?, ?, ?)`,
-            [
-              name,
-              profile.email,
-              picture,
-              roleRows.length ? roleRows[0].id : null,
-              organizationId,
-            ]
-          );
-          userId = result.insertId;
           await insertLink(pool, userId, profile);
           status = 201;
         }
@@ -373,6 +377,105 @@ router.delete(
       req.user.id,
     ]);
     return res.json(await linkStatus(pool, req.user.id));
+  })
+);
+
+// ── Sign in with Kreo ───────────────────────────────────────────────────────
+
+/** Like `requireGoogle`: no integration token or no link table → 503. */
+const requireKreo = asyncHandler(async (_req, res, next) => {
+  if (!kreoAuth.kreoSignInConfigured()) {
+    return res
+      .status(503)
+      .json({ error: "Kreo sign-in is not configured on the server." });
+  }
+  if (!(await kreoAuth.kreoAccountsEnabled(getPool()))) {
+    return res.status(503).json({
+      error:
+        "Kreo sign-in needs a database update first: run scripts/migration_kreo_accounts.sql.",
+    });
+  }
+  return next();
+});
+
+// Public: whether to offer "Sign in with Kreo".
+router.get(
+  "/kreo/config",
+  asyncHandler(async (_req, res) => {
+    const enabled =
+      kreoAuth.kreoSignInConfigured() &&
+      (await kreoAuth.kreoAccountsEnabled(getPool()));
+    return res.json({ enabled });
+  })
+);
+
+/**
+ * Sign in (or sign up) with a Kreo email and password, which we check with
+ * Kreo. Then, as for Google:
+ *  1. a Kreo person already linked → that app account;
+ *  2. an app account with the same email → link it and sign in (Kreo refuses
+ *     to log in an unverified email, so the address is the person's);
+ *  3. otherwise a new parishioner account, linked from the start.
+ */
+router.post(
+  "/kreo",
+  requireKreo,
+  asyncHandler(async (req, res) => {
+    const pool = getPool();
+    let person;
+    try {
+      person = await kreoAuth.verifyKreoLogin(
+        req.body?.email,
+        req.body?.password
+      );
+    } catch (err) {
+      // Answered here rather than by the error handler, which hides 5xx
+      // messages in production — "Kreo is unreachable" is worth showing.
+      if (!err.status) throw err;
+      return res.status(err.status).json({ error: err.message });
+    }
+
+    const link = await kreoAuth.findLinkByPerson(pool, person.id);
+    let userId = link?.user_id ?? null;
+    let status = 200;
+
+    if (!userId) {
+      const [existing] = await pool.query(
+        "SELECT id FROM users WHERE email = ? LIMIT 1",
+        [person.email]
+      );
+      try {
+        if (existing.length) {
+          userId = existing[0].id;
+          if (await kreoAuth.findLinkByUser(pool, userId)) {
+            return res.status(409).json({
+              error:
+                "The account with this email is connected to a different Kreo account.",
+            });
+          }
+          await kreoAuth.insertLink(pool, userId, person);
+        } else {
+          userId = await createPasswordlessUser(
+            pool,
+            { name: person.name, email: person.email, picture: null },
+            req.body?.organization
+          );
+          await kreoAuth.insertLink(pool, userId, person);
+          status = 201;
+        }
+      } catch (err) {
+        if (!isDuplicate(err)) throw err;
+        return res
+          .status(409)
+          .json({ error: "Sign-in was already in progress. Try again." });
+      }
+    }
+
+    const user = await loadSessionUser(pool, userId);
+    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+    return res
+      .status(status)
+      .json({ ...sessionResponse(user), created: status === 201 });
   })
 );
 

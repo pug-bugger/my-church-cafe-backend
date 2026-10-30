@@ -80,6 +80,14 @@ module.exports = {
       .map((s) => s.trim())
       .filter(Boolean),
   },
+  kreo: {
+    // Sign in with Kreo (the church's people directory). The token is the
+    // integration key a Kreo administrator issues; unset = Kreo sign-in off.
+    apiUrl: String(
+      process.env.KREO_API_URL || "https://kreo.atsinaujinimas.lt/api/v1"
+    ).replace(/\/+$/, ""),
+    apiToken: String(process.env.KREO_API_TOKEN || "").trim(),
+  },
   printer: {
     // Network receipt printer reached via raw TCP/IP printing (port 9100).
     // host unset = printing disabled (status shows "not configured").

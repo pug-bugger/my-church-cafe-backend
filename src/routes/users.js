@@ -328,6 +328,42 @@ router.post(
   }
 );
 
+// Current user: delete own account (App Store guideline 5.1.1(v)). Orders keep
+// their rows with user_id / customer_user_id set to NULL by the FKs; Google and
+// Kreo links and push tokens cascade. The last admin is refused, so nobody can
+// lock the cafe out of Manage.
+router.delete("/me", async (req, res, next) => {
+  try {
+    const pool = getPool();
+    const [rows] = await pool.query(
+      `SELECT u.picture_url, r.name AS role
+       FROM users u LEFT JOIN roles r ON u.role_id = r.id WHERE u.id = ?`,
+      [req.user.id]
+    );
+    if (rows.length === 0)
+      return res.status(404).json({ error: "User not found" });
+
+    if (rows[0].role === "admin") {
+      const [[{ admins }]] = await pool.query(
+        `SELECT COUNT(*) AS admins
+         FROM users u JOIN roles r ON u.role_id = r.id WHERE r.name = 'admin'`
+      );
+      if (Number(admins) <= 1) {
+        return res.status(409).json({
+          error:
+            "You are the only admin. Make someone else an admin before deleting your account.",
+        });
+      }
+    }
+
+    unlinkUserPicture(rows[0].picture_url);
+    await pool.query("DELETE FROM users WHERE id = ?", [req.user.id]);
+    return res.status(204).send();
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // Admin: delete user
 router.delete("/:id", requireRole("admin"), async (req, res, next) => {
   try {
